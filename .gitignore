@@ -1,0 +1,25 @@
+# Cartelle e file non tracciati (dati, ambienti, risorse docente, ecc.)
+
+# Cartelle risorse interne docente
+resources/
+
+# Python e virtual environment
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Dati
+data/
+
+experiments/logs/
+experiments/checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Log
+*.log
+
+# Cartelle di sistema (macOS)
+.DS_Store

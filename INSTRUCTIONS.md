@@ -1,4 +1,4 @@
-# Course Instructions and Projects
+<img width="215" height="17" alt="image" src="https://github.com/user-attachments/assets/9c678eda-c024-4c0e-888c-6b789dde8384" /># Course Instructions and Projects
 
 ## 📚 Initial Instructions for Students
 
@@ -30,7 +30,7 @@ This file contains the list of available projects, complete details for each pro
 | 2 | [Few-shot Learning for Gesture Recognition](#project-2) | Metric Learning | Medium | HAGRID | Free |
 | 3 | [Graph-based Metric Learning for Scene Understanding](#project-3) | Metric Learning | Large | GQA | Free |
 | 4 | [Feature-based Knowledge Distillation](#project-4) | Knowledge Distillation | Small | CIFAR-100 | G26 |
-| 5 | [Cross-Modal Knowledge Distillation (Audio to Vision)](#project-5) | Knowledge Distillation | Large | EPIC-Kitchens | Free |
+| 5 | [Cross-Modal Knowledge Distillation (Audio to Vision)](#project-5) | Knowledge Distillation | Large | EPIC-Kitchens | Overfittony |
 | 6 | [Knowledge Distillation for Mobile Action Recognition](#project-6) | Knowledge Distillation | Small | HMDB-51 | G24 |
 | 7 | [Domain Adaptation for Action Recognition – Exocentric → Egocentric](#project-7) | Domain Adaptation | Medium | Assembly101 | Free |
 | 8 | [Domain Adaptation with Image-to-Image Translation (CycleGAN)](#project-8) | Domain Adaptation | Medium | Office-31 | Free |

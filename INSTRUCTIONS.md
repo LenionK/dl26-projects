@@ -28,22 +28,22 @@ This file contains the list of available projects, complete details for each pro
 | :---: | :--- | :--- | :--- | :--- | :--- |
 | 1 | [Metric Learning for Face Recognition](#project-1) | Metric Learning | Small | CASIA-WebFace | G25 |
 | 2 | [Few-shot Learning for Gesture Recognition](#project-2) | Metric Learning | Medium | HAGRID | G32 |
-| 3 | [Graph-based Metric Learning for Scene Understanding](#project-3) | Metric Learning | Large | GQA | Free |
+| 3 | [Graph-based Metric Learning for Scene Understanding](#project-3) | Metric Learning | Large | GQA | G18 |
 | 4 | [Feature-based Knowledge Distillation](#project-4) | Knowledge Distillation | Small | CIFAR-100 | G26 |
 | 5 | [Cross-Modal Knowledge Distillation (Audio to Vision)](#project-5) | Knowledge Distillation | Large | EPIC-Kitchens | Overfittony |
 | 6 | [Knowledge Distillation for Mobile Action Recognition](#project-6) | Knowledge Distillation | Small | HMDB-51 | G24 |
 | 7 | [Domain Adaptation for Action Recognition – Exocentric → Egocentric](#project-7) | Domain Adaptation | Medium | Assembly101 | CassiaBranca |
 | 8 | [Domain Adaptation with Image-to-Image Translation (CycleGAN)](#project-8) | Domain Adaptation | Medium | Office-31 | Free |
-| 9 | [Multi-source Domain Adaptation for Action Recognition](#project-9) | Domain Adaptation | Large | Source 1 | Free |
+| 9 | [Multi-source Domain Adaptation for Action Recognition](#project-9) | Domain Adaptation | Large | HMDB-51/UCF-101/Kinetics | DataLost |
 | 10 | [Contrastive Learning for Video Representation (SimCLR)](#project-10) | Self-Supervised Learning | Small | UCF-101 | G16 |
 | 11 | [Masked Autoencoders for Image Representation Learning](#project-11) | Self-Supervised Learning | Small | ImageNet 1K | G21 |
-| 12 | [Clustering-based SSL for Action Discovery](#project-12) | Self-Supervised Learning | Medium | Kinetics-400 | Free |
+| 12 | [Clustering-based SSL for Action Discovery](#project-12) | Self-Supervised Learning | Medium | Kinetics-400 | DataMinds |
 | 13 | [Temporal Action Segmentation from Video](#project-13) | Video Understanding | Small | EGTEA Gaze+ | G26 |
 | 14 | [Action Anticipation from Video](#project-14) | Video Understanding | Medium | EPIC-KITCHENS | Le larunghie |
 | 15 | [Vision-Language Alignment with CLIP for Video](#project-15) | Vision & Language | Medium | EPIC-KITCHENS | Justgood AI |
 | 16 | [Multimodal Action Recognition – Video + Audio](#project-16) | Video Understanding | Large | EPIC-KITCHENS | DeepTeam |
 | 17 | [Egocentric Video + Gaze for Action Recognition](#project-17) | Video Understanding | Large | EGTEA Gaze+ | The Outliers 2.0 |
-| 18 | [State-Space Models (Mamba) for Mistake Detection](#project-18) | Advanced Sequential Modeling | Large | Assembly101 | Free |
+| 18 | [State-Space Models (Mamba) for Mistake Detection](#project-18) | Advanced Sequential Modeling | Large | Assembly101 | LeMeCla |
 | 19 | [Transformer vs RNN for Procedural Video Understanding](#project-19) | Advanced Sequential Modeling | Medium | EGO4D Goal-Step | Free |
 | 20 | [Image & Language Representation Learning](#project-20) | Vision & Language | Medium | MS-COCO | Free |
 | 21 | [Deep Reinforcement Learning for Frame Selection in Video](#project-21) | Reinforcement Learning | Large | UCF101 | Free |

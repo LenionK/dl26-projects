@@ -44,7 +44,7 @@ This file contains the list of available projects, complete details for each pro
 | 16 | [Multimodal Action Recognition – Video + Audio](#project-16) | Video Understanding | Large | EPIC-KITCHENS | DeepTeam |
 | 17 | [Egocentric Video + Gaze for Action Recognition](#project-17) | Video Understanding | Large | EGTEA Gaze+ | The Outliers 2.0 |
 | 18 | [State-Space Models (Mamba) for Mistake Detection](#project-18) | Advanced Sequential Modeling | Large | Assembly101 | LeMeCla |
-| 19 | [Transformer vs RNN for Procedural Video Understanding](#project-19) | Advanced Sequential Modeling | Medium | EGO4D Goal-Step | Free |
+| 19 | [Transformer vs RNN for Procedural Video Understanding](#project-19) | Advanced Sequential Modeling | Medium | EGO4D Goal-Step | BAT 🦇 (Backpropagation Attention Team) |
 | 20 | [Image & Language Representation Learning](#project-20) | Vision & Language | Medium | MS-COCO | G37 |
 | 21 | [Deep Reinforcement Learning for Frame Selection in Video](#project-21) | Reinforcement Learning | Large | UCF101 | Free |
 | 22 | [Learn to Play Super Mario Bros with Deep Reinforcement Learning](#project-22) | Reinforcement Learning | Medium | Super Mario Bros Environment | G20 |
@@ -52,6 +52,7 @@ This file contains the list of available projects, complete details for each pro
 | 24 | [Cross-Modal Knowledge Distillation (Audio to Vision)](#project-24) | Knowledge Distillation | Large | VGGSound | Zero e Uno |
 | 25 | [Learn to Drive a car with Reinforcement Learning](#project-25) | Reinforcement Learning | Large | Assetto Corsa Gym | FiCo |
 | 26 | [Graph-based Metric Learning for Scene Understanding with Semantic Web Technologies](#project-26) | Metric Learning | Large | GQA | Fly Now|
+| 27 | [Multimodal Generative VQA on Synthetic 3D Scenes](#project-27) | Vision & Language | - | Synthetic Data | G17 |
 
 ## Detailed Project Descriptions
 
@@ -659,7 +660,7 @@ While Assetto Corsa gives API to access game information, it's not as easy to co
 Compare the trained model with the PID approach developed in https://github.com/Igni-ss/CarController
 
 <a id='project-26'></a>
-### Project 26: Graph-based Metric Learning for Scene Understanding with Semantic Web Technologies
+### Track 26: Graph-based Metric Learning for Scene Understanding with Semantic Web Technologies
 **Suggested Size**: Large  
 **Reference Module**: Metric Learning  
 
@@ -684,6 +685,48 @@ To achieve this, the project will specifically integrate Semantic Web technologi
 - Test robustness to structural perturbations (e.g., artificially drop nodes/edges from test graphs to see if retrieval degrades).
 - Build a dynamic graph extractor: utilize Vision-Language Models (VLMs) or Object Trackers to automatically extract scene graphs from raw videos instead of relying on ground truth.
 - Visualize and interpret which edges/relations act as critical focal points for the model's similarity metric.
+
+<a id='project-27'></a>
+### Track 27: Multimodal Generative VQA on Synthetic 3D Scenes  
+**Reference Module**: Multimodal Deep Learning  
+
+#### Problem Description
+The project aims to build a multimodal generative model capable of answering questions about synthetic 3D scenes rendered in Blender. The system must perform spatial reasoning on single frames and temporal reasoning on pairs of consecutive frames where objects slightly move or new objects appear. All images, questions, and answers are procedurally generated through Blender Python scripting, ensuring full control over object placement, lighting, and camera viewpoints.
+
+#### Dataset
+- **Synthetic 3D Scenes**
+  - Randomized objects (cubes, spheres, cups, books, chairs, etc.)
+  - Variable lighting and camera perspectives  
+  - Paired frames with small object displacements  
+
+- **Automatically Generated QA Pairs**
+  - Single-frame examples:  
+    - “Which object is above the red cube?” → “The blue sphere”  
+    - “Which object is near the green cup?” → “The yellow cube”
+  - Two-frame examples:  
+    - “Which object moved closer to the green cube?” → “The red cup”  
+    - “Which object was added?” → “The blue book”
+
+- **Scale**
+  - ~5k unique scenes, ~10k images including variations  
+  - ≥3 questions per image  
+  - >30k QA pairs  
+
+#### Minimum Objectives
+1. **Image Encoder**  
+   Pretrained CNN or ViT for single frames or frame pairs (or difference embeddings).  
+2. **Text Encoder**  
+   Pretrained Transformer (BERT, DistilBERT).  
+3. **Fusion Module**  
+   Combines visual and textual embeddings; supports temporal inputs.  
+4. **Generative Decoder**  
+   Transformer decoder trained to produce textual answers using token-level cross-entropy.
+
+#### Extra Objectives
+- Fine-tuning on small real-image datasets  
+- Light encoder fine-tuning for improved object perception  
+- Depth map integration for enhanced spatial reasoning  
+- Semantic segmentation supervision to guide attention  
 
 ---
 

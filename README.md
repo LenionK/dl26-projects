@@ -9,8 +9,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## 👥 Group and Project Information
-- **Group ID**: [E.g., G18]
-- **Project ID**: [E.g., 3]
+- **Group ID**: [G18]
+- **Project ID**: [3]
 
 ## 📝 Project Description
 A brief paragraph (3-4 lines) that visually and concisely describes the project, the main implemented model, and the task addressed. 

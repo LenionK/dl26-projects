@@ -67,6 +67,49 @@ def compute_embeddings(
     return emb, lbl
 
 
+@torch.no_grad()
+def compute_graph_embeddings(
+    model,
+    dataset,
+    device,
+    batch_size=64,
+    num_workers=0,
+    normalize=True,
+):
+    """Compute graph-level embeddings for a PyG dataset."""
+    from torch_geometric.loader import DataLoader
+
+    model.eval()
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    all_emb = []
+    all_lbl = []
+
+    for batch in loader:
+        batch = batch.to(device)
+        emb = model(
+            batch.x,
+            batch.edge_index,
+            batch.edge_attr,
+            batch.batch,
+            batch.num_graphs,
+        )
+
+        if normalize:
+            emb = F.normalize(emb, dim=1)
+
+        all_emb.append(emb.cpu())
+        all_lbl.append(batch.y.cpu())
+
+    return torch.cat(all_emb, dim=0), torch.cat(all_lbl, dim=0)
+
+
 # =========================================================
 # FAISS INDEX
 # =========================================================

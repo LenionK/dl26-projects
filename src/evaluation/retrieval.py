@@ -381,8 +381,24 @@ def print_metrics(results):
 # QUALITATIVE RETRIEVAL VISUALIZATION
 # =========================================================
 
+import os
+
 import matplotlib.pyplot as plt
 import torch
+from PIL import Image
+
+
+def image_path_from_id(image_dir, image_id):
+    """Build image path from GQA image_id (numeric or string)."""
+    image_id = str(image_id)
+    if not image_id.lower().endswith(".jpg"):
+        image_id = f"{image_id}.jpg"
+    return os.path.join(image_dir, image_id)
+
+
+def load_retrieval_image(df, image_dir, sample_idx):
+    path = image_path_from_id(image_dir, df.iloc[sample_idx]["image_id"])
+    return np.array(Image.open(path).convert("RGB"))
 
 
 def unnormalize(img):
@@ -532,6 +548,57 @@ def plot_retrieval(
 
     plt.tight_layout()
 
+    plt.show()
+
+
+def plot_graph_retrieval(
+    df,
+    image_dir,
+    labels,
+    indices,
+    scores,
+    query_idx,
+    idx2label=None,
+    topk=5,
+    title=None,
+):
+    """
+    Visualize graph retrieval results using scene images from image_id.
+
+    df : pandas.DataFrame or GQAGraphDataset (uses .df)
+        Must contain an ``image_id`` column aligned with embedding indices.
+    """
+    if hasattr(df, "df"):
+        df = df.df
+
+    q_label_idx = int(labels[query_idx])
+    q_label = idx2label.get(q_label_idx, q_label_idx) if idx2label else q_label_idx
+
+    retrieved_idx = indices[query_idx][1 : topk + 1]
+    retrieved_scores = scores[query_idx][1 : topk + 1]
+
+    ncols = topk + 1
+    plt.figure(figsize=(3 * ncols, 3))
+
+    plt.subplot(1, ncols, 1)
+    plt.imshow(load_retrieval_image(df, image_dir, query_idx))
+    plt.axis("off")
+    plt.title(f"QUERY\n{q_label}", fontsize=9)
+
+    for j, (ridx, score) in enumerate(zip(retrieved_idx, retrieved_scores), start=2):
+        label_idx = int(labels[ridx])
+        label = idx2label.get(label_idx, label_idx) if idx2label else label_idx
+        correct = label_idx == q_label_idx
+        color = "green" if correct else "red"
+
+        plt.subplot(1, ncols, j)
+        plt.imshow(load_retrieval_image(df, image_dir, ridx))
+        plt.axis("off")
+        plt.title(f"#{j - 1} {label}\n{score:.3f}", color=color, fontsize=9)
+
+    if title:
+        plt.suptitle(title)
+    plt.tight_layout()
     plt.show()
 
 

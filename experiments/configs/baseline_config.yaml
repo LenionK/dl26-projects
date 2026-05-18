@@ -1,0 +1,18 @@
+model:
+  dim: 128
+  pretrained: true
+
+training:
+  epochs: 10
+  lr: 0.0001
+  temperature: 0.1
+  checkpoint: "experiments/checkpoints/baseline10.pth"
+
+data:
+  train_csv: "data/df_train.csv"
+  val_csv:   "data/df_val.csv"
+  images_dir: "data/images"
+
+dataloader:
+  batch_size: 64
+  num_workers: 4

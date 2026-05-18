@@ -84,3 +84,83 @@ class GINEEmbeddingNet(nn.Module):
 
         x = self.projector(x)
         return F.normalize(x, dim=1)
+    
+
+
+
+
+from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool
+
+
+class GCNEmbeddingNet(nn.Module):
+
+    def __init__(
+        self,
+        num_node_types,
+        emb_dim=128,
+        hidden_dim=256,
+        num_layers=3,
+        dropout=0.2,
+        use_bbox=True,
+        node_emb_dim=64,
+    ):
+        super().__init__()
+
+        self.use_bbox = use_bbox
+        self.dropout = dropout
+
+        # node embedding
+        self.node_emb = nn.Embedding(num_node_types, node_emb_dim, padding_idx=0)
+
+        node_in = node_emb_dim + (4 if use_bbox else 0)
+
+        self.node_encoder = nn.Sequential(
+            nn.Linear(node_in, hidden_dim),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim),
+        )
+
+        # GCN layers
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+
+        for _ in range(num_layers):
+            self.convs.append(GCNConv(hidden_dim, hidden_dim))
+            self.norms.append(nn.LayerNorm(hidden_dim))
+
+        pool_dim = hidden_dim * 2
+
+        self.projector = nn.Sequential(
+            nn.Linear(pool_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, emb_dim),
+        )
+
+    def encode_nodes(self, x):
+        node_type = x[:, 0].long().clamp_min(0)
+        h = self.node_emb(node_type)
+
+        if self.use_bbox:
+            h = torch.cat([h, x[:, 1:5]], dim=1)
+
+        return self.node_encoder(h)
+
+    def forward(self, x, edge_index, batch):
+        x = self.encode_nodes(x)
+
+        for conv, norm in zip(self.convs, self.norms):
+            h = conv(x, edge_index)
+            x = norm(h)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+
+        # pooling
+        mean_pool = global_mean_pool(x, batch)
+        max_pool = global_max_pool(x, batch)
+
+        x = torch.cat([mean_pool, max_pool], dim=1)
+
+        x = self.projector(x)
+
+        return F.normalize(x, dim=1)

@@ -110,6 +110,54 @@ def compute_graph_embeddings(
     return torch.cat(all_emb, dim=0), torch.cat(all_lbl, dim=0)
 
 
+import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def gcn_compute_graph_embeddings(
+    model,
+    dataset,
+    device,
+    batch_size=64,
+    num_workers=0,
+    normalize=True,
+):
+    """Compute graph-level embeddings for a PyG dataset (GCN version)."""
+
+    from torch_geometric.loader import DataLoader
+
+    model.eval()
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+
+    all_emb = []
+    all_lbl = []
+
+    for batch in loader:
+        batch = batch.to(device)
+
+        # ✔️ GCN FORWARD
+        emb = model(
+            batch.x,
+            batch.edge_index,
+            batch.batch,
+        )
+
+        # ⚠️ avoid double normalization if model already normalizes
+        if normalize:
+            emb = F.normalize(emb, dim=1)
+
+        all_emb.append(emb.cpu())
+        all_lbl.append(batch.y.cpu())
+
+    return torch.cat(all_emb, dim=0), torch.cat(all_lbl, dim=0)
+
+
 # =========================================================
 # FAISS INDEX
 # =========================================================
@@ -412,8 +460,13 @@ def unnormalize(img):
     return (img * std + mean).clamp(0, 1)
 
 
+import matplotlib.pyplot as plt
+import numpy as np
+
+
 def plot_retrieval(
-    dataset,
+    df,
+    image_dir,
     labels,
     indices,
     scores,
@@ -423,44 +476,17 @@ def plot_retrieval(
     title=None,
 ):
     """
-    Visualize retrieval results.
-
-    Parameters
-    ----------
-    dataset : Dataset
-        PyTorch dataset
-
-    labels : torch.Tensor
-        Labels tensor [N]
-
-    indices : np.ndarray
-        FAISS retrieved indices [N, k+1]
-
-    scores : np.ndarray
-        FAISS similarity scores [N, k+1]
-
-    query_idx : int
-        Query sample index
-
-    idx2label : dict
-        Optional class-name mapping
-
-    topk : int
-        Number of retrieved samples to display
+    Visualize retrieval results using images from dataframe + image_dir.
     """
 
+    if hasattr(df, "df"):
+        df = df.df
+
     # -----------------------------------------------------
-    # QUERY
+    # QUERY IMAGE
     # -----------------------------------------------------
 
-    img_q, _ = dataset[query_idx]
-
-    img_q = (
-        unnormalize(img_q)
-        .permute(1, 2, 0)
-        .cpu()
-        .numpy()
-    )
+    img_q = load_retrieval_image(df, image_dir, query_idx)
 
     q_label_idx = int(labels[query_idx])
 
@@ -472,7 +498,6 @@ def plot_retrieval(
 
     # -----------------------------------------------------
     # RETRIEVED
-    # remove self-match
     # -----------------------------------------------------
 
     retrieved_idx = indices[query_idx][1 : topk + 1]
@@ -483,38 +508,20 @@ def plot_retrieval(
     # -----------------------------------------------------
 
     ncols = topk + 1
-
     plt.figure(figsize=(3 * ncols, 3))
 
-    # -----------------------------------------------------
-    # QUERY IMAGE
-    # -----------------------------------------------------
-
+    # QUERY
     plt.subplot(1, ncols, 1)
-
     plt.imshow(img_q)
-
     plt.axis("off")
-
     plt.title(f"QUERY\n{q_label}")
 
-    # -----------------------------------------------------
-    # RETRIEVED IMAGES
-    # -----------------------------------------------------
-
+    # RETRIEVED
     for j, (ridx, score) in enumerate(
         zip(retrieved_idx, retrieved_scores),
         start=2,
     ):
-
-        img_r, _ = dataset[ridx]
-
-        img_r = (
-            unnormalize(img_r)
-            .permute(1, 2, 0)
-            .cpu()
-            .numpy()
-        )
+        img_r = load_retrieval_image(df, image_dir, ridx)
 
         label_idx = int(labels[ridx])
 
@@ -525,29 +532,21 @@ def plot_retrieval(
         )
 
         correct = label_idx == q_label_idx
-
         color = "green" if correct else "red"
 
         plt.subplot(1, ncols, j)
-
         plt.imshow(img_r)
-
         plt.axis("off")
-
         plt.title(
             f"#{j-1} {label}\n{score:.3f}",
             color=color,
         )
 
-    # -----------------------------------------------------
     # TITLE
-    # -----------------------------------------------------
-
     if title:
         plt.suptitle(title)
 
     plt.tight_layout()
-
     plt.show()
 
 

@@ -30,19 +30,25 @@ def _load_checkpoint(checkpoint_path, model, optimizer=None, device=None):
     return 1, []
 
 
-def _save_checkpoint(save_path, model, optimizer, epoch, loss_history):
+def _save_checkpoint(save_path, model, optimizer, epoch, loss_history,
+                     node_vocab=None, rel_vocab=None):
     ckpt_dir = os.path.dirname(save_path)
     if ckpt_dir:
         os.makedirs(ckpt_dir, exist_ok=True)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "loss_history": loss_history,
-        },
-        save_path,
-    )
+
+    ckpt = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss_history": loss_history,
+    }
+
+    if node_vocab is not None:
+        ckpt["node_vocab"] = node_vocab
+    if rel_vocab is not None:
+        ckpt["rel_vocab"] = rel_vocab
+
+    torch.save(ckpt, save_path)
 
 
 def train_model(
@@ -96,6 +102,7 @@ def train_model(
         print(f"Epoch {epoch}/{epochs} - loss: {avg_loss:.4f}")
 
     if save_path is not None:
+        # CNN: niente node_vocab / rel_vocab
         _save_checkpoint(save_path, model, optimizer, epoch, loss_history)
         print(f"Checkpoint saved to: {save_path}")
 
@@ -107,6 +114,8 @@ def train_graph_model(
     loader,
     loss_fn,
     device,
+    node_vocab,
+    rel_vocab,
     epochs=10,
     lr=1e-4,
     weight_decay=1e-4,
@@ -175,15 +184,11 @@ def train_graph_model(
         print(f"Epoch {epoch}/{epochs} - loss: {avg_loss:.4f} - lr: {current_lr:.2e}")
 
     if save_path is not None:
-        _save_checkpoint(save_path, model, optimizer, epoch, loss_history)
+        _save_checkpoint(save_path, model, optimizer, epoch, loss_history,
+                         node_vocab=node_vocab, rel_vocab=rel_vocab)
         print(f"Checkpoint saved to: {save_path}")
 
     return model, loss_history
-
-
-import torch
-from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 def train_graph_model_gcn(
@@ -191,6 +196,8 @@ def train_graph_model_gcn(
     loader,
     loss_fn,
     device,
+    node_vocab,
+    rel_vocab,
     epochs=10,
     lr=1e-4,
     weight_decay=1e-4,
@@ -212,7 +219,6 @@ def train_graph_model_gcn(
         )
         if resume_epoch is not None:
             start_epoch = resume_epoch
-
         print(f"Resumed from {checkpoint_path} (epoch {start_epoch}/{epochs})")
 
     scheduler = None
@@ -232,7 +238,6 @@ def train_graph_model_gcn(
         for batch in loader:
             batch = batch.to(device)
 
-            # ✔️ GCN FORWARD (NO edge_attr)
             emb = model(
                 batch.x,
                 batch.edge_index,
@@ -257,15 +262,12 @@ def train_graph_model_gcn(
 
         avg_loss = total_loss / max(1, n_batches)
         loss_history.append(avg_loss)
-
         current_lr = optimizer.param_groups[0]["lr"]
-        print(
-            f"Epoch {epoch}/{epochs} - "
-            f"loss: {avg_loss:.4f} - lr: {current_lr:.2e}"
-        )
+        print(f"Epoch {epoch}/{epochs} - loss: {avg_loss:.4f} - lr: {current_lr:.2e}")
 
     if save_path is not None:
-        _save_checkpoint(save_path, model, optimizer, epoch, loss_history)
+        _save_checkpoint(save_path, model, optimizer, epoch, loss_history,
+                         node_vocab=node_vocab, rel_vocab=rel_vocab)
         print(f"Checkpoint saved to: {save_path}")
 
     return model, loss_history

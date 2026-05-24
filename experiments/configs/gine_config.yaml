@@ -14,8 +14,8 @@ training:
   weight_decay: 0.0001
   temperature: 0.07
   checkpoint: "experiments/checkpoints/gnn20.pth"
-  resume_from: null          # es. "experiments/checkpoints/gnn10.pth"
-  resume_epoch: null         # es. 11
+  resume_from: null
+  resume_epoch: null
 
 data:
   train_csv: "data/df_train.csv"
@@ -25,5 +25,8 @@ dataloader:
   batch_size: 64
   num_workers: 0
   n_samples: 4
+
+evaluation:
+  drop_prob: 0.3            # probabilità di rimuovere un nodo in eval perturbata
 
 seed: 42

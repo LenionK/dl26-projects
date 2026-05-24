@@ -1,11 +1,7 @@
 import sys
 import os
-import argparse
 
-BASE_DIR = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
@@ -13,72 +9,46 @@ import yaml
 import pandas as pd
 import torch
 
-from src.datasets.gqa_graph_dataset import (
-    GQAGraphDataset,
-    build_node_vocab,
-    build_rel_vocab,
-)
-
+from src.datasets.gqa_graph_dataset import GQAGraphDataset
 from src.models.gnn import GCNEmbeddingNet
-
-from src.training.train_model import load_model_weights
-
-from src.evaluation.retrieval import (
-    gcn_compute_graph_embeddings,
-    evaluate_retrieval,
-    print_metrics,
-)
+from src.evaluation.retrieval import gcn_compute_graph_embeddings, evaluate_retrieval, print_metrics
 
 
-def main(config_name):
-
-    # ---------------------------------------------------------------------------
+def main():
+    # -------------------------------------------------------------------------
     # Config
-    # ---------------------------------------------------------------------------
-    config_path = os.path.join(
-        BASE_DIR,
-        "experiments",
-        "conf",
-        config_name,
-    )
-
+    # -------------------------------------------------------------------------
+    config_path = os.path.join(BASE_DIR, "experiments", "configs", "gcn_config.yaml")
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
-    # ---------------------------------------------------------------------------
-    # Data
-    # ---------------------------------------------------------------------------
-    df_train = pd.read_csv(
-        os.path.join(BASE_DIR, cfg["data"]["train_csv"])
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    df_val = pd.read_csv(
-        os.path.join(BASE_DIR, cfg["data"]["val_csv"])
-    )
+    # -------------------------------------------------------------------------
+    # Carica checkpoint e vocabolari
+    # -------------------------------------------------------------------------
+    ckpt_path  = os.path.join(BASE_DIR, cfg["training"]["checkpoint"])
+    checkpoint = torch.load(ckpt_path, map_location=device)
+
+    node_vocab = checkpoint["node_vocab"]
+    rel_vocab  = checkpoint["rel_vocab"]
+
+    print(f"Checkpoint caricato da: {ckpt_path}")
+    print(f"node_vocab size: {len(node_vocab)} | rel_vocab size: {len(rel_vocab)}")
+
+    # -------------------------------------------------------------------------
+    # Data
+    # -------------------------------------------------------------------------
+    df_train = pd.read_csv(os.path.join(BASE_DIR, cfg["data"]["train_csv"]))
+    df_val   = pd.read_csv(os.path.join(BASE_DIR, cfg["data"]["val_csv"]))
 
     all_labels = df_train["labels"].unique()
-
-    label2idx = {
-        l: i for i, l in enumerate(all_labels)
-    }
-
-    idx2label = {
-        i: l for l, i in label2idx.items()
-    }
+    label2idx  = {l: i for i, l in enumerate(all_labels)}
+    idx2label  = {i: l for l, i in label2idx.items()}
 
     df_train["labels"] = df_train["labels"].map(label2idx)
-    df_val["labels"] = df_val["labels"].map(label2idx)
+    df_val["labels"]   = df_val["labels"].map(label2idx)
 
-    # ---------------------------------------------------------------------------
-    # Vocabulary
-    # ---------------------------------------------------------------------------
-    node_vocab = build_node_vocab(df_train)
-
-    rel_vocab = build_rel_vocab(df_train)
-
-    # ---------------------------------------------------------------------------
-    # Dataset
-    # ---------------------------------------------------------------------------
     val_dataset = GQAGraphDataset(
         df=df_val,
         label_col="labels",
@@ -89,24 +59,9 @@ def main(config_name):
         use_bbox=cfg["model"]["use_bbox"],
     )
 
-    # ---------------------------------------------------------------------------
-    # Device
-    # ---------------------------------------------------------------------------
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
-
-    # ---------------------------------------------------------------------------
-    # Checkpoint
-    # ---------------------------------------------------------------------------
-    ckpt_path = os.path.join(
-        BASE_DIR,
-        cfg["training"]["checkpoint"]
-    )
-
-    # ---------------------------------------------------------------------------
-    # Model
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Modello
+    # -------------------------------------------------------------------------
     gcn_model = GCNEmbeddingNet(
         num_node_types=len(node_vocab) + 1,
         emb_dim=cfg["model"]["emb_dim"],
@@ -117,19 +72,12 @@ def main(config_name):
         node_emb_dim=cfg["model"]["node_emb_dim"],
     ).to(device)
 
-    load_model_weights(
-        ckpt_path,
-        gcn_model,
-        device,
-    )
-
+    gcn_model.load_state_dict(checkpoint["model_state_dict"])
     gcn_model.eval()
 
-    print(f"Checkpoint caricato da: {ckpt_path}")
-
-    # ---------------------------------------------------------------------------
-    # Embeddings
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Retrieval Evaluation
+    # -------------------------------------------------------------------------
     embeddings, labels = gcn_compute_graph_embeddings(
         model=gcn_model,
         dataset=val_dataset,
@@ -142,9 +90,6 @@ def main(config_name):
     print("Embeddings shape:", embeddings.shape)
     print("Labels shape:    ", labels.shape)
 
-    # ---------------------------------------------------------------------------
-    # Retrieval Evaluation
-    # ---------------------------------------------------------------------------
     results, indices, scores = evaluate_retrieval(
         embeddings,
         labels,
@@ -154,22 +99,5 @@ def main(config_name):
     print_metrics(results)
 
 
-# ---------------------------------------------------------------------------
-# ENTRY POINT
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(
-        description="GCN retrieval evaluation script"
-    )
-
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="gcn_config.yaml",
-        help="Nome del file YAML in experiments/conf",
-    )
-
-    args = parser.parse_args()
-
-    main(args.config)
+    main()

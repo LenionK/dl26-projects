@@ -1,11 +1,7 @@
 import sys
 import os
-import argparse
 
-BASE_DIR = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
@@ -13,81 +9,46 @@ import yaml
 import pandas as pd
 import torch
 
-from src.datasets.gqa_graph_dataset import (
-    GQAGraphDataset,
-    build_node_vocab,
-    build_rel_vocab,
-)
-
+from src.datasets.gqa_graph_dataset import GQAGraphDataset
 from src.models.gnn import GINEEmbeddingNet
-
-from src.training.train_model import (
-    load_model_weights,
-)
-
-from src.evaluation.retrieval import (
-    compute_graph_embeddings,
-    evaluate_retrieval,
-    print_metrics,
-)
+from src.evaluation.retrieval import compute_graph_embeddings, evaluate_retrieval, print_metrics
 
 
-def main(config_name):
-
+def main():
     # -------------------------------------------------------------------------
     # Config
     # -------------------------------------------------------------------------
-    config_path = os.path.join(
-        BASE_DIR,
-        "experiments",
-        "conf",
-        config_name,
-    )
-
+    config_path = os.path.join(BASE_DIR, "experiments", "configs", "gine_config.yaml")
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # -------------------------------------------------------------------------
-    # Device
+    # Carica checkpoint e vocabolari
     # -------------------------------------------------------------------------
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    ckpt_path  = os.path.join(BASE_DIR, cfg["training"]["checkpoint"])
+    checkpoint = torch.load(ckpt_path, map_location=device)
+
+    node_vocab = checkpoint["node_vocab"]
+    rel_vocab  = checkpoint["rel_vocab"]
+
+    print(f"Checkpoint caricato da: {ckpt_path}")
+    print(f"node_vocab size: {len(node_vocab)} | rel_vocab size: {len(rel_vocab)}")
 
     # -------------------------------------------------------------------------
     # Data
     # -------------------------------------------------------------------------
-    df_train = pd.read_csv(
-        os.path.join(BASE_DIR, cfg["data"]["train_csv"])
-    )
-
-    df_val = pd.read_csv(
-        os.path.join(BASE_DIR, cfg["data"]["val_csv"])
-    )
+    df_train = pd.read_csv(os.path.join(BASE_DIR, cfg["data"]["train_csv"]))
+    df_val   = pd.read_csv(os.path.join(BASE_DIR, cfg["data"]["val_csv"]))
 
     all_labels = df_train["labels"].unique()
-
-    label2idx = {
-        l: i for i, l in enumerate(all_labels)
-    }
-
-    idx2label = {
-        i: l for l, i in label2idx.items()
-    }
+    label2idx  = {l: i for i, l in enumerate(all_labels)}
+    idx2label  = {i: l for l, i in label2idx.items()}
 
     df_train["labels"] = df_train["labels"].map(label2idx)
-    df_val["labels"] = df_val["labels"].map(label2idx)
+    df_val["labels"]   = df_val["labels"].map(label2idx)
 
-    # -------------------------------------------------------------------------
-    # Vocabulary
-    # -------------------------------------------------------------------------
-    node_vocab = build_node_vocab(df_train)
-
-    rel_vocab = build_rel_vocab(df_train)
-
-    # -------------------------------------------------------------------------
-    # Dataset
-    # -------------------------------------------------------------------------
     val_dataset = GQAGraphDataset(
         df=df_val,
         label_col="labels",
@@ -99,15 +60,7 @@ def main(config_name):
     )
 
     # -------------------------------------------------------------------------
-    # Checkpoint
-    # -------------------------------------------------------------------------
-    ckpt_path = os.path.join(
-        BASE_DIR,
-        cfg["training"]["checkpoint"]
-    )
-
-    # -------------------------------------------------------------------------
-    # Model
+    # Modello
     # -------------------------------------------------------------------------
     gine_model = GINEEmbeddingNet(
         num_node_types=len(node_vocab) + 1,
@@ -120,18 +73,11 @@ def main(config_name):
         node_emb_dim=cfg["model"]["node_emb_dim"],
     ).to(device)
 
-    load_model_weights(
-        ckpt_path,
-        gine_model,
-        device,
-    )
-
+    gine_model.load_state_dict(checkpoint["model_state_dict"])
     gine_model.eval()
 
-    print(f"Checkpoint caricato da: {ckpt_path}")
-
     # -------------------------------------------------------------------------
-    # Embeddings
+    # Retrieval Evaluation
     # -------------------------------------------------------------------------
     embeddings, labels = compute_graph_embeddings(
         model=gine_model,
@@ -145,9 +91,6 @@ def main(config_name):
     print("Embeddings shape:", embeddings.shape)
     print("Labels shape:    ", labels.shape)
 
-    # -------------------------------------------------------------------------
-    # Retrieval Evaluation
-    # -------------------------------------------------------------------------
     results, indices, scores = evaluate_retrieval(
         embeddings,
         labels,
@@ -157,22 +100,5 @@ def main(config_name):
     print_metrics(results)
 
 
-# -------------------------------------------------------------------------
-# ENTRY POINT
-# -------------------------------------------------------------------------
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(
-        description="GINE retrieval evaluation script"
-    )
-
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="gine_config.yaml",
-        help="Nome del file YAML in experiments/conf",
-    )
-
-    args = parser.parse_args()
-
-    main(args.config)
+    main()

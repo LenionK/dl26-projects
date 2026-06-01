@@ -1,0 +1,31 @@
+model:
+  num_node_types: null       # calcolato a runtime: len(node_vocab) + 1
+  emb_dim: 128
+  hidden_dim: 256
+  num_layers: 4
+  dropout: 0.2
+  use_bbox: true
+  node_emb_dim: 64
+
+training:
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.0001
+  temperature: 0.07
+  checkpoint: "experiments/checkpoints/gcn_v2_20.pth"
+  resume_from: null
+  resume_epoch: null
+
+data:
+  train_csv: "data/df_train.csv"
+  val_csv:   "data/df_val.csv"
+
+dataloader:
+  batch_size: 64
+  num_workers: 0
+  n_samples: 4
+
+evaluation:
+  drop_prob: 0.3            # probabilità di rimuovere un nodo in eval perturbata
+
+seed: 42

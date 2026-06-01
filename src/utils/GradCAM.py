@@ -26,14 +26,20 @@ transform_vis = transforms.Compose([
 # ---------------------------------------------------------------------------
 # GradCAM++
 # ---------------------------------------------------------------------------
+
 class GradCAMPlusPlus:
     def __init__(self, model, target_layer):
         self.model       = model
         self.activations = None
         self.gradients   = None
+        # salva gli handle per poterli rimuovere
+        self._handle_fwd = target_layer.register_forward_hook(self._save_activation)
+        self._handle_bwd = target_layer.register_full_backward_hook(self._save_gradient)
 
-        target_layer.register_forward_hook(self._save_activation)
-        target_layer.register_full_backward_hook(self._save_gradient)
+    def remove(self):
+        """Rimuove gli hook — chiamare dopo l'uso."""
+        self._handle_fwd.remove()
+        self._handle_bwd.remove()
 
     def _save_activation(self, module, input, output):
         self.activations = output.detach()
@@ -81,8 +87,8 @@ def overlay_heatmap(image_np, cam, alpha=0.5):
     heatmap = np.array(heatmap) / 255.0
     return np.clip(alpha * heatmap + (1 - alpha) * image_np, 0, 1)
 
-
 def show_gradcam(image_paths, model, target_layer, titles=None, alpha=0.5, cols=4):
+
     """
     Visualizza GradCAM++ per una lista di immagini.
 
@@ -94,9 +100,9 @@ def show_gradcam(image_paths, model, target_layer, titles=None, alpha=0.5, cols=
         alpha        : intensità della heatmap (0-1)
         cols         : numero di colonne nella griglia
     """
-    device = next(model.parameters()).device
-    gradcam = GradCAMPlusPlus(model, target_layer)
-
+        
+    device  = next(model.parameters()).device
+    gradcam = GradCAMPlusPlus(model, target_layer)  
     n    = len(image_paths)
     rows = (n + cols - 1) // cols
 
@@ -129,3 +135,5 @@ def show_gradcam(image_paths, model, target_layer, titles=None, alpha=0.5, cols=
 
     plt.tight_layout()
     plt.show()
+
+    gradcam.remove()  # pulizia hook

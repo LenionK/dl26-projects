@@ -23,11 +23,6 @@ def supervised_contrastive_loss(features, labels, temperature=0.1):
     return -mean_log_prob_pos.mean()
 
 
-
-import torch
-import torch.nn.functional as F
-
-
 import torch
 import torch.nn.functional as F
 
@@ -70,3 +65,80 @@ def supervised_contrastive_loss_GNN(features, labels, temperature=0.1):
     loss = -(mask * log_prob).sum(dim=1) / denom
 
     return loss.mean()
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class ProxyTripletLoss(nn.Module):
+    """
+    Proxy Triplet Loss
+
+    Ogni classe ha un proxy apprendibile.
+    Gli embedding vengono avvicinati al proxy corretto
+    e allontanati dal proxy negativo più vicino.
+    """
+
+    def __init__(
+        self,
+        num_classes,
+        embedding_dim,
+        margin=0.2,
+        normalize=True,
+    ):
+        super().__init__()
+
+        self.margin = margin
+        self.normalize = normalize
+
+        self.proxies = nn.Parameter(
+            torch.randn(num_classes, embedding_dim)
+        )
+
+        nn.init.kaiming_normal_(self.proxies)
+
+    def forward(self, embeddings, labels):
+
+        if self.normalize:
+            embeddings = F.normalize(embeddings, dim=1)
+            proxies = F.normalize(self.proxies, dim=1)
+        else:
+            proxies = self.proxies
+
+        # distanza embedding <-> proxy
+        dist_matrix = torch.cdist(
+            embeddings,
+            proxies,
+            p=2
+        )
+
+        batch_idx = torch.arange(
+            embeddings.size(0),
+            device=embeddings.device
+        )
+
+        # proxy positivo
+        pos_dist = dist_matrix[
+            batch_idx,
+            labels
+        ]
+
+        # maschera per escludere la classe corretta
+        neg_mask = torch.ones_like(dist_matrix)
+        neg_mask[batch_idx, labels] = 0
+
+        neg_dist = dist_matrix.masked_fill(
+            neg_mask == 0,
+            float("inf")
+        )
+
+        # hardest negative proxy
+        hardest_neg_dist, _ = neg_dist.min(dim=1)
+
+        loss = F.relu(
+            pos_dist - hardest_neg_dist + self.margin
+        )
+
+        return loss.mean()

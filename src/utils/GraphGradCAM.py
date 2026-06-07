@@ -11,110 +11,119 @@ import pandas as pd
 import seaborn as sns
 
 
-#import torch
-import torch.nn.functional as F
-
+# ---------------------------------------------------------------------------
+# Classe GraphGradCAM
+# ---------------------------------------------------------------------------
 class GraphGradCAM:
-    def __init__(self, model, target_layer, prototypes):
-        """
-        prototypes: dict {class_id: embedding tensor [D]}
-        """
+    def __init__(self, model, target_layer):
         self.model = model
         self.target_layer = target_layer
-        self.prototypes = prototypes
-
         self.activations = None
-        self.gradients = None
+        self.gradients   = None
 
-        self.forward_hook = target_layer.register_forward_hook(self._save_activations)
+        self.forward_hook  = target_layer.register_forward_hook(self._save_activations)
         self.backward_hook = target_layer.register_full_backward_hook(self._save_gradients)
 
-    # ---------------- hooks ----------------
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.remove_hooks()
+
     def _save_activations(self, module, input, output):
         self.activations = output.detach().clone()
 
     def _save_gradients(self, module, grad_input, grad_output):
         self.gradients = grad_output[0].detach().clone()
 
-    # ---------------- main ----------------
-
-    def compute_node_importance(self, x, edge_index, batch, target_class, edge_attr=None):
-
-        if batch is None:
-            batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
-
+    def compute_node_importance(self, x, edge_index, edge_attr=None, prototype=None):
+        """
+        Calcola l'importanza dei nodi usando la proiezione dell'embedding 
+        sul prototipo della classe target (corretto per Metric Learning).
+        """
         self.model.eval()
-
         self.activations = None
-        self.gradients = None
+        self.gradients   = None
 
-        # forward pass
-        try:
-            if edge_attr is not None:
-                z = self.model(x, edge_index, edge_attr, batch)
-            else:
-                z = self.model(x, edge_index, batch)
-        except TypeError:
-            z = self.model(x, edge_index, batch)
+        if prototype is None:
+            raise ValueError("Per i modelli di embedding è necessario passare un 'prototype' (vettore).")
 
-        z = F.normalize(z, dim=1)
+        # Creiamo il vettore batch per un singolo grafo
+        batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        
+        # Forward pass: otteniamo l'embedding del grafo
+        if edge_attr is not None:
+            # Assicurati che i parametri rispecchino la firma esatta del tuo GINE
+            emb = self.model(x, edge_index, edge_attr, batch)
+        else:
+            # Per il GCN
+            emb = self.model(x, edge_index, batch)
 
-        prototype = self.prototypes[target_class].to(z.device)
-        prototype = F.normalize(prototype, dim=0)
+        # Forziamo le dimensioni a [1, Dimensioni_Embedding]
+        emb = emb.view(1, -1)
+        prototype = prototype.to(x.device).view(1, -1)
 
-        score = -torch.norm(z - prototype, p=2)
+        # Calcoliamo lo score scalare tramite Prodotto Scalare (Dot Product)
+        # Rappresenta quanto il grafo corrente è vicino al centro della classe target
+        score = torch.mm(emb, prototype.t()).squeeze()
 
+        # Backward pass per accumulare i gradienti sul layer target
         self.model.zero_grad()
         score.backward()
 
-        alpha = self.gradients.mean(dim=0, keepdim=True)
-        node_weights = torch.sum(alpha * self.activations, dim=-1)
-        node_importance = torch.relu(node_weights)
+        if self.gradients is None or self.activations is None:
+            raise RuntimeError(
+                "Hook non catturati. Verifica che il 'target_layer' inserito "
+                "sia un layer intermedio (es. convs[-1]) e NON il layer di pooling finale."
+            )
 
+        # Controllo di sicurezza sulla dimensionalità delle attivazioni (livello nodi)
+        if self.activations.dim() != 2 or self.activations.size(0) != x.size(0):
+            raise RuntimeError(
+                f"Forma attivazioni errata: {self.activations.shape}. "
+                f"Il target_layer deve restituire un tensore con {x.size(0)} nodi."
+            )
+
+        # Calcolo Grad-CAM standard sui nodi
+        alpha           = self.gradients.mean(dim=0, keepdim=True)   # [1, Features]
+        node_weights    = torch.sum(alpha * self.activations, dim=-1) # [Num_Nodi]
+        node_importance = torch.clamp(node_weights, min=0)            # ReLU
+
+        # Normalizzazione
         max_val = node_importance.max()
         if max_val > 0:
             node_importance = node_importance / max_val
-            
+        else:
+            warnings.warn("Gradienti nulli per questo sample: importanza posta a zero.", RuntimeWarning)
 
         return node_importance.cpu().numpy()
-    
+
     def remove_hooks(self):
-        if hasattr(self, "forward_hook"):
-            self.forward_hook.remove()
-        if hasattr(self, "backward_hook"):
-            self.backward_hook.remove()
+        self.forward_hook.remove()
+        self.backward_hook.remove()
 
-from collections import defaultdict
-import torch
-import torch.nn.functional as F
+def compute_class_prototypes(gallery_embs, df_labels):
+    """
+    Calcola il prototipo (centroide) di ogni classe facendo la media degli embedding.
+    
+    Args:
+        gallery_embs: Tensore [N, D] contenente gli embedding di tutti i grafi.
+        df_labels: Serie o array di lunghezza N con le label di classe associate ad ogni embedding.
+    Returns:
+        dict: { class_id -> Tensore 1D [D] (il prototipo) }
+    """
+    prototypes = {}
+    unique_classes = np.unique(df_labels)
+    
+    for cls in unique_classes:
+        indices = np.where(df_labels == cls)[0]
+        # Estrae tutti gli embedding appartenenti alla classe cls e fa la media
+        class_embs = gallery_embs[indices]
+        prototypes[cls] = class_embs.mean(dim=0)
+        
+    return prototypes
 
-def compute_prototypes(model, loader, device):
-    model.eval()
 
-    class_embeddings = defaultdict(list)
-
-    with torch.no_grad():
-        for data in loader:
-            data = data.to(device)
-
-            labels = data.y
-            batch = data.batch
-
-            
-            try:
-                z = model(data.x, data.edge_index, data.edge_attr, batch)
-            except TypeError:
-                z = model(data.x, data.edge_index, batch)
-
-            z = F.normalize(z, dim=1)
-
-            for emb, y in zip(z, labels):
-                class_embeddings[int(y)].append(emb.cpu())
-
-    return {
-        c: torch.stack(v).mean(dim=0)
-        for c, v in class_embeddings.items()
-    }
 # ---------------------------------------------------------------------------
 # Wrapper modelli per GNNExplainer
 # ---------------------------------------------------------------------------
@@ -147,10 +156,9 @@ def build_explainer(wrapped_model, epochs=200):
     """
     Crea un Explainer GNNExplainer per un modello wrappato.
 
-    Nota: mode="regression" è impostato perché i modelli producono un embedding
-    vettoriale (metric learning) e non una distribuzione di classe. GNNExplainer
-    ottimizza la maschera rispetto alla singola coordinata di embedding indicata
-    da target_class in compute_node_importance.
+    Nota: mode="regression" è corretto perché i modelli producono un embedding
+    vettoriale (metric learning). GNNExplainer ottimizza la maschera rispetto
+    alla singola coordinata indicata da target_class.
     """
     return Explainer(
         model=wrapped_model,
@@ -196,6 +204,48 @@ def get_edge_labels_gine(edge_index, edge_attr, node_names, rel_vocab):
 
 
 # ---------------------------------------------------------------------------
+# Utility embedding
+# ---------------------------------------------------------------------------
+def get_embedding(model, data, device, model_type="gine"):
+    """
+    Esegue un forward pass e restituisce l'embedding del grafo come tensore 1D.
+
+    Args:
+        model_type: "gine" — chiama model(x, edge_index, edge_attr, batch, num_graphs=1)
+                    "gcn"  — chiama model(x, edge_index, batch)
+    Returns:
+        Tensore 1D [D] su CPU.
+    """
+    model.eval()
+    data  = data.to(device)
+    batch = torch.zeros(data.x.size(0), dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        if model_type == "gine":
+            emb = model(data.x, data.edge_index, data.edge_attr, batch, num_graphs=1)
+        else:
+            emb = model(data.x, data.edge_index, batch)
+
+    return emb.squeeze(0)  # [D]
+
+
+def get_topk_neighbors(query_emb, gallery_embs, topk=10):
+    """
+    Restituisce gli indici dei top-k vicini più vicini nello spazio metrico
+    usando distanza euclidea.
+
+    Args:
+        query_emb   : tensore 1D [D]
+        gallery_embs: tensore 2D [N, D]
+        topk        : numero di vicini
+    Returns:
+        Lista di indici (int) ordinata per distanza crescente.
+    """
+    dists = torch.norm(gallery_embs - query_emb.unsqueeze(0), dim=1)
+    return torch.argsort(dists)[:topk].tolist()
+
+
+# ---------------------------------------------------------------------------
 # Visualizzazione
 # ---------------------------------------------------------------------------
 def show_image(image_id, image_dir, label, ax):
@@ -208,29 +258,30 @@ def show_image(image_id, image_dir, label, ax):
 
 
 # ---------------------------------------------------------------------------
-# Pipeline di Visualizzazione e Confronto (Plot a 3 colonne)
+# Plot Grad-CAM: confronto GCN vs GINE (3 colonne, per sample singolo)
 # ---------------------------------------------------------------------------
-def plot_gradcam_comparison(idx, df_val, image_dir, idx2label, val_dataset_gcn, val_dataset_gine,
-                            node_vocab_gcn, node_vocab_gine, cam_gcn, cam_gine, device, topk=8):
+def plot_gradcam_comparison(idx, df_val, image_dir, idx2label,
+                            val_dataset_gcn, val_dataset_gine,
+                            node_vocab_gcn, node_vocab_gine,
+                            cam_gcn, cam_gine, device, topk=8):
 
     data_gcn  = val_dataset_gcn[idx].to(device)
     data_gine = val_dataset_gine[idx].to(device)
 
-    row       = df_val.iloc[idx]
-    image_id  = row['image_id']
-    target_id = int(row['labels'])
+    row         = df_val.iloc[idx]
+    image_id    = row['image_id']
+    target_id   = int(row['labels'])
+    target_name = idx2label.get(target_id, f"ID d'Embedding: {target_id}")
 
-    # Nome della classe reale (es. "Cane", "Automobile", ecc.) invece di "ID d'Embedding"
-    target_name = idx2label.get(target_id, f"Classe {target_id}")
-
-    imp_nodes_gcn = cam_gcn.compute_node_importance(
-        data_gcn.x, data_gcn.edge_index, batch=data_gcn.batch, target_class=target_id
+    imp_nodes_gcn  = cam_gcn.compute_node_importance(
+        data_gcn.x, data_gcn.edge_index, target_class=target_id
     )
-
     imp_nodes_gine = cam_gine.compute_node_importance(
-        data_gine.x, data_gine.edge_index, edge_attr=data_gine.edge_attr, batch=data_gine.batch, target_class=target_id
+        data_gine.x, data_gine.edge_index,
+        edge_attr=data_gine.edge_attr, target_class=target_id
     )
-    names_gcn  = get_node_names(data_gcn, node_vocab_gcn)
+
+    names_gcn  = get_node_names(data_gcn,  node_vocab_gcn)
     names_gine = get_node_names(data_gine, node_vocab_gine)
 
     top_nodes_gcn  = np.argsort(imp_nodes_gcn)[-topk:]
@@ -238,37 +289,31 @@ def plot_gradcam_comparison(idx, df_val, image_dir, idx2label, val_dataset_gcn, 
 
     fig, axes = plt.subplots(1, 3, figsize=(20, 5.5))
 
-    # Colonna 1: Immagine query
-    show_image(
-        image_id, image_dir,
-        f"Query di Partenza: {target_name}\n(Sample Index: {idx})",
-        ax=axes[0]
-    )
+    show_image(image_id, image_dir,
+               f"Query: {target_name}\n(Sample Index: {idx})", ax=axes[0])
 
-    # Colonna 2: GCN (TITOLO CORRETTO)
     axes[1].barh(
         [names_gcn[i] for i in top_nodes_gcn],
         imp_nodes_gcn[top_nodes_gcn],
         color=cm.Oranges(imp_nodes_gcn[top_nodes_gcn] / (imp_nodes_gcn.max() + 1e-8))
     )
     axes[1].set_title(
-        f"GCN — Nodi chiave per l'allineamento\nal prototipo di: {target_name}",
+        f"GCN — Grad-CAM\ndim {target_id} dell'Embedding",
         fontsize=10, fontweight='bold', color='#D35400'
     )
-    axes[1].set_xlabel("Importanza del Nodo (Grad-CAM su Distanza Metrica)")
+    axes[1].set_xlabel("Magnitudo del Gradiente nello Spazio Metrico")
     axes[1].grid(axis='x', linestyle='--', alpha=0.4)
 
-    # Colonna 3: GINE (TITOLO CORRETTO)
     axes[2].barh(
         [names_gine[i] for i in top_nodes_gine],
         imp_nodes_gine[top_nodes_gine],
         color=cm.Greens(imp_nodes_gine[top_nodes_gine] / (imp_nodes_gine.max() + 1e-8))
     )
     axes[2].set_title(
-        f"GINE — Nodi chiave per l'allineamento\nal prototipo di: {target_name}",
+        f"GINE — Grad-CAM\ndim {target_id} dell'Embedding",
         fontsize=10, fontweight='bold', color='#1E8449'
     )
-    axes[2].set_xlabel("Importanza del Nodo (Grad-CAM su Distanza Metrica)")
+    axes[2].set_xlabel("Magnitudo del Gradiente nello Spazio Metrico")
     axes[2].grid(axis='x', linestyle='--', alpha=0.4)
 
     plt.tight_layout()
@@ -276,14 +321,119 @@ def plot_gradcam_comparison(idx, df_val, image_dir, idx2label, val_dataset_gcn, 
 
 
 # ---------------------------------------------------------------------------
-# Analisi globale degli archi — GINE (GNNExplainer)
+# Grad-CAM aggregato per classe
+# ---------------------------------------------------------------------------
+def aggregate_node_importance_by_class(
+    cam, dataset, node_vocab, df, target_classes, prototypes,
+    device, num_samples_per_class=30, use_edge_attr=False
+):
+    """
+    Aggiornato per usare i PROTOTIPI nel calcolo della Grad-CAM.
+    """
+    idx2node = {v: k for k, v in node_vocab.items()}
+    class_indices = {cls: df.index[df['labels'] == cls].tolist() for cls in target_classes}
+    results = {}
+
+    for cls, indices in class_indices.items():
+        if not indices:
+            warnings.warn(f"Nessun sample trovato per la classe {cls}.", RuntimeWarning)
+            continue
+        
+        if cls not in prototypes:
+            warnings.warn(f"Prototipo non trovato per la classe {cls}.", RuntimeWarning)
+            continue
+            
+        # Preleviamo il prototipo specifico di questa classe
+        proto = prototypes[cls].to(device)
+
+        sample_idx  = indices[:num_samples_per_class]
+        node_scores = defaultdict(list)
+
+        for idx in sample_idx:
+            data       = dataset[idx].to(device)
+            node_types = data.x[:, 0].long().cpu().numpy()
+
+            try:
+                # Passiamo 'proto' al posto di target_class
+                if use_edge_attr:
+                    imp = cam.compute_node_importance(
+                        data.x, data.edge_index,
+                        edge_attr=data.edge_attr, prototype=proto
+                    )
+                else:
+                    imp = cam.compute_node_importance(
+                        data.x, data.edge_index, prototype=proto
+                    )
+            except Exception as e:
+                warnings.warn(f"Sample {idx} skippato: {e}", RuntimeWarning)
+                continue
+
+            for node_idx, importance in enumerate(imp):
+                node_name = idx2node.get(int(node_types[node_idx]), f"node_{node_types[node_idx]}")
+                node_scores[node_name].append(float(importance))
+
+        results[cls] = pd.Series({
+            name: np.mean(scores) for name, scores in node_scores.items()
+        }).sort_values(ascending=False)
+
+    return results
+
+
+def plot_node_importance_by_class(
+    results_gcn, results_gine, idx2label,
+    num_samples_per_class, topk=10
+):
+    """
+    Per ogni classe: 2 barplot affiancati (GCN | GINE) con l'importanza
+    media per tipo di nodo, calcolata su num_samples_per_class campioni.
+
+    La struttura a griglia (n_classi × 2) permette un confronto diretto
+    tra architetture e tra classi.
+    """
+    classes = list(results_gcn.keys())
+    n       = len(classes)
+    fig, axes = plt.subplots(n, 2, figsize=(16, 4.5 * n))
+
+    # Normalizza axes a lista di coppie anche con n==1
+    if n == 1:
+        axes = [axes]
+
+    for row, cls in enumerate(classes):
+        label_name = idx2label.get(cls, f"Classe {cls}")
+
+        for col, (scores, color, model_name) in enumerate([
+            (results_gcn.get(cls,  pd.Series(dtype=float)), '#E67E22', 'GCN'),
+            (results_gine.get(cls, pd.Series(dtype=float)), '#1E8449', 'GINE'),
+        ]):
+            ax  = axes[row][col]
+            top = scores.head(topk)
+
+            ax.barh(top.index[::-1], top.values[::-1], color=color, alpha=0.85)
+            ax.set_title(
+                f"{model_name} — Classe: {label_name}\n"
+                f"(media su {num_samples_per_class} campioni, top-{topk} nodi)",
+                fontsize=10, fontweight='bold'
+            )
+            ax.set_xlabel("Importanza Media (Grad-CAM)")
+            ax.grid(axis='x', linestyle='--', alpha=0.4)
+
+    plt.suptitle(
+        "Node Importance Aggregata per Classe — GCN vs GINE",
+        fontsize=13, fontweight='bold', y=1.01
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Analisi globale archi — GINE (GNNExplainer)
 # ---------------------------------------------------------------------------
 def analyze_global_edge_importance_with_explainer(
     dataset_gine, model_gine, rel_vocab_gine, device, num_samples=50
 ):
     """
-    Calcola l'importanza media degli archi aggregata per tipo di relazione
-    utilizzando GNNExplainer sul modello GINE.
+    Calcola l'importanza media degli archi per tipo di relazione usando
+    GNNExplainer sul modello GINE.
     """
     idx2rel    = {v: k for k, v in rel_vocab_gine.items()}
     rel_scores = defaultdict(list)
@@ -307,30 +457,31 @@ def analyze_global_edge_importance_with_explainer(
             if data.edge_attr.dim() == 1
             else data.edge_attr[:, 0].cpu().numpy()
         )
-
         for r_id, importance in zip(rels, imp_edges):
-            rel_name = idx2rel.get(int(r_id), f"Rel_{r_id}")
-            rel_scores[rel_name].append(importance)
+            rel_scores[idx2rel.get(int(r_id), f"Rel_{r_id}")].append(importance)
 
     global_stats = [
-        {'Relazione': rel_name, 'Importanza Media': np.mean(scores), 'Conteggio': len(scores)}
-        for rel_name, scores in rel_scores.items()
+        {'Relazione': r, 'Importanza Media': np.mean(s), 'Conteggio': len(s)}
+        for r, s in rel_scores.items()
     ]
-
-    df_edges = pd.DataFrame(global_stats)
-    df_edges = df_edges.sort_values(by='Importanza Media', ascending=False).reset_index(drop=True)
-    return df_edges
+    df = pd.DataFrame(global_stats).sort_values(
+        by='Importanza Media', ascending=False
+    ).reset_index(drop=True)
+    return df
 
 
 # ---------------------------------------------------------------------------
-# Analisi globale degli archi — GCN (GNNExplainer)
+# Analisi globale archi — GCN (GNNExplainer)
 # ---------------------------------------------------------------------------
 def analyze_global_edge_importance_gcn(
-    dataset_gcn, model_gcn, node_vocab_gcn, device, num_samples=50
+    dataset_gcn, model_gcn, node_vocab_gcn, device, num_samples=50, min_count=3
 ):
     """
     Calcola l'importanza media degli archi per il modello GCN aggregandoli
     per coppia di tipi di nodo (Sorgente → Destinazione).
+    
+    Aggiunto filtraggio per 'min_count' per evitare che relazioni viste una sola volta
+    falsino la cima della classifica.
     """
     idx2node   = {v: k for k, v in node_vocab_gcn.items()}
     rel_scores = defaultdict(list)
@@ -354,48 +505,283 @@ def analyze_global_edge_importance_gcn(
         node_types = data.x[:, 0].long().cpu().numpy()
 
         for s, d, importance in zip(src_nodes, dst_nodes, imp_edges):
-            type_src      = idx2node.get(int(node_types[s]), f"Node_{node_types[s]}")
-            type_dst      = idx2node.get(int(node_types[d]), f"Node_{node_types[d]}")
-            relation_pair = f"{type_src} → {type_dst}"
-            rel_scores[relation_pair].append(importance)
+            type_src = idx2node.get(int(node_types[s]), f"Node_{node_types[s]}")
+            type_dst = idx2node.get(int(node_types[d]), f"Node_{node_types[d]}")
+            rel_scores[f"{type_src} → {type_dst}"].append(importance)
 
-    global_stats = [
-        {'Relazione': pair_name, 'Importanza Media': np.mean(scores), 'Conteggio': len(scores)}
-        for pair_name, scores in rel_scores.items()
-    ]
+    # Costruiamo le statistiche globali
+    global_stats = []
+    for r, s in rel_scores.items():
+        conteggio = len(s)
+        # Filtriamo l'outlier PRIMA di popolare il report se non soddisfa la frequenza minima
+        if conteggio >= min_count:
+            global_stats.append({
+                'Relazione': r, 
+                'Importanza Media': float(np.mean(s)), 
+                'Conteggio': conteggio
+            })
 
-    df_edges = pd.DataFrame(global_stats)
-    df_edges = df_edges.sort_values(by='Importanza Media', ascending=False).reset_index(drop=True)
-    return df_edges
+    # Se il filtro è stato troppo severo e non è rimasto nulla, lancia un avviso anziché crashare
+    if not global_stats:
+        warnings.warn(
+            f"Nessuna relazione ha superato la soglia di min_count={min_count}. "
+            "Prova ad aumentare 'num_samples' nel notebook o ad abbassare 'min_count'.",
+            RuntimeWarning
+        )
+        # Riprova senza filtro per non restituire un dataframe vuoto
+        global_stats = [
+            {'Relazione': r, 'Importanza Media': float(np.mean(s)), 'Conteggio': len(s)}
+            for r, s in rel_scores.items()
+        ]
+
+    df = pd.DataFrame(global_stats).sort_values(
+        by='Importanza Media', ascending=False
+    ).reset_index(drop=True)
+    
+    return df
 
 
 # ---------------------------------------------------------------------------
 # Plot studio globale archi
 # ---------------------------------------------------------------------------
 def plot_global_edge_study(df_edges, topk=15, model_name="GINE"):
-    """
-    Mostra un grafico a barre globale delle relazioni più importanti nello spazio latente.
-    'model_name' viene usato nel titolo per distinguere GCN da GINE.
-    """
+    """Barplot delle top-k relazioni più importanti nello spazio latente."""
     plt.figure(figsize=(12, 6))
     df_plot = df_edges.head(topk)
 
     sns.barplot(
-        x='Importanza Media',
-        y='Relazione',
-        data=df_plot,
-        palette='viridis',
-        hue='Relazione',
-        legend=False
+        x='Importanza Media', y='Relazione',
+        data=df_plot, palette='viridis',
+        hue='Relazione', legend=False
     )
-
     plt.title(
-        f"Studio Globale sugli Archi ({model_name}) — "
-        f"Top {topk} Relazioni Semantiche nello Spazio Latente",
+        f"Studio Globale Archi ({model_name}) — Top {topk} Relazioni",
         fontsize=12, fontweight='bold'
     )
-    plt.xlabel("Importanza Relativa Media (GNNExplainer — Edge Mask)")  # FIX: era "Grad-CAM"
-    plt.ylabel("Tipo di Relazione (Arco)")
+    plt.xlabel("Importanza Media (GNNExplainer — Edge Mask)")
+    plt.ylabel("Tipo di Relazione")
     plt.grid(axis='x', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+
+# ===========================================================================
+# SEZIONE 2 — FOCAL POINT ANALYSIS
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Costruzione gallery embeddings
+# ---------------------------------------------------------------------------
+def build_gallery_embeddings(model, dataset, device, model_type="gine"):
+    """
+    Calcola l'embedding di tutti i sample del dataset e li restituisce
+    come tensore [N, D] su CPU.
+
+    Args:
+        model_type: "gine" o "gcn" — propagato a get_embedding per usare
+                    la firma corretta di ciascun modello.
+    """
+    model.eval()
+    embs = []
+    with torch.no_grad():
+        for data in dataset:
+            embs.append(get_embedding(model, data, device, model_type=model_type).cpu())
+    return torch.stack(embs, dim=0)  # [N, D]
+
+
+# ---------------------------------------------------------------------------
+# Robustezza per tipo di relazione — delta embedding
+# ---------------------------------------------------------------------------
+def robustness_by_relation_type(model, dataset, rel_vocab, device,
+                                 num_samples=None, model_type="gine"):
+    """
+    Per ogni tipo di relazione nel vocabolario, rimuove tutti gli archi
+    di quel tipo da ciascun grafo e misura il delta in norma L2 sull'embedding.
+
+    Un delta alto indica che quella relazione è strutturalmente critica
+    per il modello (single point of failure).
+
+    Args:
+        model_type: "gine" o "gcn".
+    Returns:
+        pd.Series con indice = nome relazione, valori = delta medio.
+    """
+    samples = list(dataset)
+    if num_samples is not None:
+        samples = samples[:num_samples]
+
+    results = {}
+
+    for rel_name, rel_id in rel_vocab.items():
+        deltas = []
+        for data in samples:
+            data = data.to(device)
+
+            if model_type == "gine" and data.edge_attr is None:
+                continue
+
+            base_emb = get_embedding(model, data, device, model_type=model_type)
+
+            if model_type == "gine":
+                mask = (
+                    data.edge_attr[:, 0] != rel_id
+                    if data.edge_attr.dim() > 1
+                    else data.edge_attr != rel_id
+                )
+                if mask.sum() < 2:
+                    continue
+
+                data_pert            = data.clone()
+                data_pert.edge_index = data.edge_index[:, mask]
+                data_pert.edge_attr  = data.edge_attr[mask]
+            else:
+                # GCN: non ha vocabolario di relazioni semantiche,
+                # rimuoviamo archi casualmente come proxy di robustezza
+                mask = torch.ones(data.edge_index.size(1), dtype=torch.bool)
+                if mask.sum() < 2:
+                    continue
+                data_pert            = data.clone()
+                data_pert.edge_index = data.edge_index[:, mask]
+
+            pert_emb = get_embedding(model, data_pert, device, model_type=model_type)
+            deltas.append(torch.norm(base_emb - pert_emb).item())
+
+        results[rel_name] = float(np.mean(deltas)) if deltas else 0.0
+
+    return pd.Series(results).sort_values(ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Focal point analysis — ranking disruption
+# ---------------------------------------------------------------------------
+def focal_point_analysis(model, dataset, gallery_embs, rel_vocab, device,
+                          topk=10, num_samples=None, model_type="gine"):
+    """
+    Per ogni tipo di relazione misura quanto la sua rimozione altera il
+    ranking dei vicini più prossimi nello spazio metrico.
+
+    Metrica: Ranking Disruption = 1 - overlap(top-k base, top-k perturbed)
+      0.0 = relazione irrilevante per il retrieval
+      1.0 = relazione ridetermina completamente il ranking (focal point critico)
+
+    Args:
+        gallery_embs: tensore [N, D] prodotto da build_gallery_embeddings.
+        model_type  : "gine" o "gcn".
+    Returns:
+        pd.Series con indice = nome relazione, valori = disruption media.
+    """
+    gallery_embs = gallery_embs.to(device)
+    samples      = list(dataset)
+    if num_samples is not None:
+        samples = samples[:num_samples]
+
+    results = {}
+
+    for rel_name, rel_id in rel_vocab.items():
+        disruptions = []
+        for data in samples:
+            data = data.to(device)
+
+            if model_type == "gine" and data.edge_attr is None:
+                continue
+
+            base_emb  = get_embedding(model, data, device, model_type=model_type)
+            base_rank = set(get_topk_neighbors(base_emb, gallery_embs, topk))
+
+            if model_type == "gine":
+                mask = (
+                    data.edge_attr[:, 0] != rel_id
+                    if data.edge_attr.dim() > 1
+                    else data.edge_attr != rel_id
+                )
+                if mask.sum() < 2:
+                    continue
+
+                data_pert            = data.clone()
+                data_pert.edge_index = data.edge_index[:, mask]
+                data_pert.edge_attr  = data.edge_attr[mask]
+            else:
+                mask = torch.ones(data.edge_index.size(1), dtype=torch.bool)
+                if mask.sum() < 2:
+                    continue
+                data_pert            = data.clone()
+                data_pert.edge_index = data.edge_index[:, mask]
+
+            pert_emb  = get_embedding(model, data_pert, device, model_type=model_type)
+            pert_rank = set(get_topk_neighbors(pert_emb, gallery_embs, topk))
+
+            overlap = len(base_rank & pert_rank) / topk
+            disruptions.append(1.0 - overlap)
+
+        results[rel_name] = float(np.mean(disruptions)) if disruptions else 0.0
+
+    return pd.Series(results).sort_values(ascending=False)
+
+
+
+# ---------------------------------------------------------------------------
+# Plot distribuzione disruption per una singola relazione
+# ---------------------------------------------------------------------------
+def plot_disruption_distribution(model, dataset, gallery_embs, rel_vocab,
+                                  rel_name, device, topk=10, num_samples=None,
+                                  model_name="GINE", model_type="gine"):
+    """
+    Istogramma + KDE della Ranking Disruption per una singola relazione.
+    Utile per verificare se l'effetto è uniforme o concentrato su pochi outlier.
+    """
+    rel_id       = rel_vocab[rel_name]
+    gallery_embs = gallery_embs.to(device)
+    samples      = list(dataset)
+    if num_samples is not None:
+        samples = samples[:num_samples]
+
+    disruptions = []
+    for data in samples:
+        data = data.to(device)
+
+        if model_type == "gine" and data.edge_attr is None:
+            continue
+
+        base_emb  = get_embedding(model, data, device, model_type=model_type)
+        base_rank = set(get_topk_neighbors(base_emb, gallery_embs, topk))
+
+        if model_type == "gine":
+            mask = (
+                data.edge_attr[:, 0] != rel_id
+                if data.edge_attr.dim() > 1
+                else data.edge_attr != rel_id
+            )
+        else:
+            mask = torch.ones(data.edge_index.size(1), dtype=torch.bool)
+
+        if mask.sum() < 2:
+            continue
+
+        data_pert            = data.clone()
+        data_pert.edge_index = data.edge_index[:, mask]
+        if model_type == "gine":
+            #data_pert.edge_attr = data.edge_attr[mask]
+            data_pert.edge_attr = data.edge_attr[mask, :] if data.edge_attr.dim() > 1 else data.edge_attr[mask]
+
+        pert_emb  = get_embedding(model, data_pert, device, model_type=model_type)
+        pert_rank = set(get_topk_neighbors(pert_emb, gallery_embs, topk))
+        disruptions.append(1.0 - len(base_rank & pert_rank) / topk)
+
+    if not disruptions:
+        print(f"Nessun sample valido per la relazione '{rel_name}'.")
+        return
+
+    plt.figure(figsize=(8, 4))
+    sns.histplot(disruptions, bins=20, kde=True, color='steelblue', edgecolor='white')
+    plt.axvline(np.mean(disruptions), color='red', linestyle='--',
+                label=f"Media: {np.mean(disruptions):.3f}")
+    plt.xlabel("Ranking Disruption")
+    plt.ylabel("Frequenza")
+    plt.title(
+        f"Distribuzione Disruption — '{rel_name}' ({model_name})\n"
+        f"n={len(disruptions)} sample, top-{topk} retrieval",
+        fontweight='bold'
+    )
+    plt.legend()
     plt.tight_layout()
     plt.show()

@@ -171,6 +171,7 @@ La loss principale è la **Supervised Contrastive Loss** con temperatura:
 | Scheduler | — | CosineAnnealingLR |
 | Epochs | 10 | 20 |
 | Grad clipping | — | max_norm=1.0 |
+| Batch sampling | BalancedBatchSampler (6 classi × 4 campioni) | BalancedGraphBatchSampler (6 classi × 4 campioni)|
 
 Il **BalancedBatchSampler** campiona equamente le classi presenti nel batch, essenziale per la contrastive loss che richiede almeno un positivo per campione. I checkpoint salvano `model_state_dict`, `optimizer_state_dict`, `loss_history`, e per i modelli a grafo anche `node_vocab` e `rel_vocab`.
 
@@ -409,7 +410,7 @@ Strumenti di IA generativa (es. GitHub Copilot, ChatGPT, Cursor) sono stati util
 
 - Scrittura di boilerplate code.
 - Debugging e refactoring.
-- Documentazione e redazione di parti di questa relazione.
+- Revisione sintattica di questo documento.
 
 Le scelte architetturali (GCN vs GINE, supervised contrastive loss, protocollo di valutazione retrieval, analisi focal point) e la responsabilità dei risultati sono del gruppo.
 

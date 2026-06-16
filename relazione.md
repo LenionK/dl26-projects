@@ -390,22 +390,11 @@ python src/evaluation/gine_eval.py
 
 ---
 
-## 12. Informazioni Aggiuntive
-
-### 12.1 Ripartizione dei Compiti
-
-*(Da completare con i nomi dei componenti del gruppo G18)*
-
-- **Membro 1**: ...
-- **Membro 2**: ...
-- **Membro 3**: ...
-
-### 12.2 Utilizzo dell'Intelligenza Artificiale
+### 12 Utilizzo dell'Intelligenza Artificiale
 
 Strumenti di IA generativa (es. GitHub Copilot, ChatGPT, Cursor) sono stati utilizzati per:
 
-- Scrittura di boilerplate code (DataLoader, checkpoint, argparse).
-- Debugging e refactoring del training loop.
+- Debugging e refactoring.
 - Documentazione e redazione di parti di questa relazione.
 
 Le scelte architetturali (GCN vs GINE, supervised contrastive loss, protocollo di valutazione retrieval, analisi focal point) e la responsabilità dei risultati sono del gruppo.

@@ -199,39 +199,27 @@ class GQAGraphDataset(Dataset):
         return data
 
 
-
-
-
-
 class BalancedGraphBatchSampler(Sampler):
-
-    def __init__(self, labels, n_classes, n_samples):
+    def __init__(self, labels, n_classes: int = 6, n_samples: int = 4):
         self.labels = np.array(labels)
         self.labels_set = np.unique(self.labels)
-
         self.label_to_indices = {
             label: np.where(self.labels == label)[0]
             for label in self.labels_set
         }
-
         self.n_classes = int(n_classes)
         self.n_samples = int(n_samples)
-
         if len(self.labels_set) < self.n_classes:
             raise ValueError("Not enough classes")
 
     def __iter__(self):
-
         for _ in range(len(self)):
-
             classes = np.random.choice(
                 self.labels_set,
                 self.n_classes,
                 replace=False
             )
-
             indices = []
-
             for c in classes:
                 idxs = np.random.choice(
                     self.label_to_indices[c],
@@ -239,7 +227,6 @@ class BalancedGraphBatchSampler(Sampler):
                     replace=True
                 )
                 indices.extend(idxs.tolist())
-
             yield indices
 
     def __len__(self):

@@ -171,7 +171,6 @@ La loss principale è la **Supervised Contrastive Loss** con temperatura:
 | Scheduler | — | CosineAnnealingLR |
 | Epochs | 10 | 20 |
 | Grad clipping | — | max_norm=1.0 |
-| Batch sampling | BalancedBatchSampler (6 classi × 4 campioni) | BalancedGraphBatchSampler (tutte le classi × 4 campioni) |
 
 Il **BalancedBatchSampler** campiona equamente le classi presenti nel batch, essenziale per la contrastive loss che richiede almeno un positivo per campione. I checkpoint salvano `model_state_dict`, `optimizer_state_dict`, `loss_history`, e per i modelli a grafo anche `node_vocab` e `rel_vocab`.
 
@@ -259,16 +258,25 @@ Un valore alto indica che quella relazione è un *single point of failure* per i
 
 ## 7. Risultati
 
-### 7.1 Retrieval su Validation Set (grafo intatto, drop_prob = 0%)
+### 7.1 Confronto Baseline vs GCN vs GINE su Validation Set (grafo intatto, drop_prob = 0%)
 
-Risultati ottenuti dal notebook `perturbation_comparison.ipynb` sul validation set (~3.208 campioni):
+Gli script `src/evaluation/baseline_eval.py`, `gcn_eval.py` e `gine_eval.py` sono stati eseguiti sul validation set (~3.208 campioni) per ottenere un confronto numerico diretto tra i tre modelli su tutte le metriche di retrieval implementate (risultati in `confronto_metriche_retrieval.csv`):
 
-| Modello | acc@1 | precision_macro | recall_macro | mAP |
-| :--- | :---: | :---: | :---: | :---: |
-| **GCN** | **59.66%** | **55.98%** | **55.38%** | **65.94%** |
-| **GINE** | 49.91% | 48.78% | 48.92% | 57.78% |
+| Metrica | Baseline (CNN) | GCN | GINE |
+| :--- | :---: | :---: | :---: |
+| acc@1 | **62.31%** | 59.66% | 49.91% |
+| precision_macro | **58.55%** | 56.73% | 48.77% |
+| recall_macro | 56.68% | **56.61%** | 48.92% |
+| recall@5 | **83.95%** | 82.04% | 78.83% |
+| recall@10 | **88.81%** | 87.91% | 85.72% |
+| precision@5 | **61.95%** | 60.32% | 50.02% |
+| precision@10 | **61.52%** | 60.46% | 49.78% |
+| MRR | **71.63%** | 69.49% | 62.10% |
+| mAP | **68.00%** | 66.31% | 57.78% |
 
-Il **GCN supera GINE** su tutte le metriche di retrieval nel setup sperimentale attuale. Una possibile spiegazione è che GINE, pur essendo più espressivo, richiede più dati o tuning iperparametrico per convergere; inoltre il vocabolario delle relazioni è ampio e sparsamente popolato, rendendo l'edge embedding più difficile da apprendere su un subset ridotto.
+Contrariamente all'ipotesi di partenza, la **baseline CNN risulta il modello con le performance di retrieval più alte** su (quasi) tutte le metriche, seguita da GCN e poi da GINE. Il GCN resta comunque il migliore dei due encoder a grafo, confermando il pattern GCN > GINE già osservato in fase di analisi. Tra Baseline e GCN il margine è contenuto (circa 2-3 punti percentuali su acc@1 e mAP), mentre GINE rimane sensibilmente più indietro.
+
+Questo risultato completa il confronto numerico baseline vs GNN che nella prima stesura della relazione era indicato come mancante (cfr. Sez. 8, Limiti), e viene discusso in dettaglio in Sez. 7.3 e Sez. 8.
 
 ### 7.2 Robustezza alle Perturbazioni
 
@@ -288,7 +296,9 @@ Degradazione delle performance al crescere della probabilità di rimozione nodi:
 
 ### 7.3 Baseline CNN
 
-La baseline ResNet-18 è addestrata e valutabile tramite gli script dedicati. Essendo basata esclusivamente sull'aspetto visivo, ci si aspetta che eccella su classi fortemente correlate al contenuto pixel (es. *a beach scene*) ma fatichi a generalizzare su scene strutturalmente simili con appearance diversa — limite che i modelli a grafo mirano a superare.
+Come riportato in Sez. 7.1, la baseline ResNet-18 ottiene in pratica le metriche di retrieval più alte tra i tre modelli (acc@1 = 62.31%, mAP = 68.00%). Questo risultato è in parte spiegabile dal modo in cui sono state generate le etichette di classe (Sez. 3.3): le 14 classi sceniche derivano da prompt CLIP basati sull'**aspetto visivo complessivo** della scena (es. *a beach scene*, *a kitchen interior*), un segnale che una CNN pre-addestrata su ImageNet è naturalmente molto efficace a catturare. I modelli a grafo, al contrario, ricevono solo informazione strutturale (oggetti e relazioni) e devono inferire la classe scenica da quella sola struttura, perdendo per costruzione l'informazione di colore, texture e illuminazione che ha contribuito a definire l'etichetta stessa.
+
+Questo non invalida l'ipotesi di partenza sul valore dei scene graph, ma suggerisce che, con etichette di classe definite in base all'aspetto visivo, il confronto è strutturalmente favorevole alla baseline. Il vantaggio dei modelli a grafo è più plausibile su task dove la similarità "vera" è definita dalla composizione semantica (stessi oggetti/relazioni) indipendentemente dall'appearance — condizione che andrebbe verificata con etichette di classe costruite direttamente sulla struttura del grafo piuttosto che su CLIP visivo (cfr. Sez. 8).
 
 ---
 
@@ -298,28 +308,31 @@ La baseline ResNet-18 è addestrata e valutabile tramite gli script dedicati. Es
 
 Le scene non sono semplici collezioni di pixel: sono **composizioni di entità e relazioni**. Un GCN/GINE può riconoscere che due scene contengono {stove, refrigerator, cabinet} con relazioni spaziali simili, anche se illuminazione e colori differiscono. La baseline CNN deve inferire implicitamente tale struttura dai pixel, un compito più difficile con dati limitati.
 
+### Baseline vs GCN vs GINE
+
+Il confronto numerico completo (Sez. 7.1) mostra l'ordinamento **Baseline > GCN > GINE** su quasi tutte le metriche, con la baseline CNN davanti per 2-3 punti percentuali rispetto al GCN. Questo risultato va letto alla luce di come sono state costruite le etichette di classe (pseudo-label CLIP basate sull'aspetto visivo, Sez. 3.3): premia per costruzione un modello che, come la CNN, lavora direttamente sui pixel. I modelli a grafo restano comunque competitivi pur ignorando completamente l'informazione visiva, e tra di essi il GCN si conferma superiore al GINE.
+
 ### GCN vs GINE
 
 | Aspetto | GCN | GINE |
 | :--- | :--- | :--- |
 | Feature archi | Solo topologia | Tipo semantico della relazione |
 | Layer convoluzioni | 3 | 4 |
-| Performance retrieval | Migliore nel setup attuale | Inferiore, più sensibile a perturbazioni |
+| Performance retrieval | Migliore tra i due encoder a grafo | Inferiore, più sensibile a perturbazioni |
 | Interpretabilità relazioni | Per coppia tipi-nodo | Per tipo semantico (es. *on*, *wearing*) |
 
 ### Limiti attuali
 
 1. **Subset ridotto**: solo il 30% di GQA, con classi sbilanciate.
-2. **Etichette CLIP**: pseudo-label automatiche, non ground truth; possibili errori di classificazione.
+2. **Etichette CLIP**: pseudo-label automatiche, non ground truth; possibili errori di classificazione. Inoltre, essendo basate sull'aspetto visivo della scena, favoriscono per costruzione un confronto con la baseline CNN (cfr. Sez. 7.3): un'etichettatura basata sulla struttura del grafo (oggetti/relazioni) renderebbe il confronto con GCN/GINE più equo.
 3. **Scene graph ground truth**: si assume che GQA fornisca grafi perfetti; in produzione servirebbe un extractor automatico.
-4. **Nessun confronto numerico baseline vs GNN** nel notebook principale (valutabile eseguendo `baseline_eval.py`).
-5. **`dataset_preprocessing.py` vuoto**: il preprocessing è documentato nel notebook `analisi_dataset.ipynb`.
+4. **`dataset_preprocessing.py` vuoto**: il preprocessing è documentato nel notebook `analisi_dataset.ipynb`.
 
 ---
 
 ## 9. Conclusioni
 
-Il progetto dimostra la fattibilità di un sistema di **metric learning su scene graphs** per il retrieval semantico di scene. L'encoder **GCN** raggiunge quasi il **60% di acc@1** sul validation set, superando GINE e mostrando buona robustezza alle perturbazioni strutturali.
+Il progetto dimostra la fattibilità di un sistema di **metric learning su scene graphs** per il retrieval semantico di scene. L'encoder **GCN** raggiunge quasi il **60% di acc@1** sul validation set, superando GINE e mostrando buona robustezza alle perturbazioni strutturali. Il confronto numerico completo con la baseline CNN (Sez. 7.1) mostra però che quest'ultima resta il modello con le metriche di retrieval più alte (acc@1 = 62.31%, mAP = 68.00%), un risultato in larga parte attribuibile al fatto che le etichette di classe sono derivate dall'aspetto visivo della scena (Sez. 3.3, 7.3). I modelli a grafo restano comunque competitivi pur non avendo accesso ai pixel, e tra i due il GCN è sistematicamente superiore al GINE.
 
 Gli obiettivi extra sono stati affrontati con:
 - Test di robustezza sistematico (perturbazione nodi).
@@ -328,7 +341,7 @@ Gli obiettivi extra sono stati affrontati con:
 
 **Sviluppi futuri:**
 - Addestrare su dataset completo GQA.
-- Confronto diretto baseline CNN vs GCN vs GINE con tabella unificata.
+- Definire etichette di classe basate sulla struttura del grafo (anziché su CLIP visivo) per un confronto baseline vs GNN più equo.
 - Scene graph extractor automatico (VLM / object detector).
 - Fine-tuning iperparametri GINE (numero layer, edge embedding dim).
 - Integrazione di augmentations strutturali durante il training.

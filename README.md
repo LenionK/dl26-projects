@@ -8,7 +8,7 @@
 - **Project ID**: [3]
 
 ## 📝 Project Description
-L'obiettivo principale è verificae se è possibile superare il limite delle architetture CNN classiche (che riducono l'immagine ad un singolo vettore piatto ignorando le relazioni spaziali e semantiche) modellando esplicitamente le scene complesse sotto forma di grafi (Scene Graphs). Utilizzando modelli di Graph Neural Network, nello specifico reti GCN (Graph Convolutional Network) e reti GINE (Graph Isomorphism Network with Edge features), il sistema mappa nodi (oggetti) ed archi (relazioni) in uno spazio latente ottimizzato tramite Supervised Contrastive Loss per raggruppare scenari semanticamente vicini e permettere un recupero accurato.
+L'obiettivo principale è verificare se è possibile superare il limite delle architetture CNN classiche (che riducono l'immagine ad un singolo vettore piatto ignorando le relazioni spaziali e semantiche) modellando esplicitamente le scene complesse sotto forma di grafi (Scene Graphs). Utilizzando modelli di Graph Neural Network, nello specifico reti GCN (Graph Convolutional Network) e reti GINE (Graph Isomorphism Network with Edge features), il sistema mappa nodi (oggetti) ed archi (relazioni) in uno spazio latente ottimizzato tramite Supervised Contrastive Loss per raggruppare scenari semanticamente vicini e permettere un recupero accurato.
 
 > 📖 **Official Report**: For all theoretical details, performance analysis, the architecture used, and group contributions, please refer to our formal paper: **[REPORT.md](docs/REPORT.md)**.
 
@@ -28,6 +28,14 @@ conda activate dl-project
 
 **Dataset:**
 Il progetto utilizza il dataset GQA (disponibile sul [sito ufficiale](https://cs.stanford.edu/people/dorarad/gqa/download.html)). Deve eseese inserito nella cartella .data/
+
+**Etichettatura dataset**
+Prima di poter passare al training è necessario eseguire la seguente istruzione per creare i file .csv richiesti nelle prossime istruzioni in quanto il dataset raw non contiene etichette.
+```bash
+python src/datasets/dataset_preprocessing.py
+```
+
+
 
 ### 2. Network Training
 Il repository mette a disposizione script dedicati sia per l'addestramento della baseline CNN, sia per l'addestramento dei modelli grafici basati su grafi (GCN e GINE). Ogni script accetta la propria configurazione tramite file YAML in cui è possibile definire i parametri di rete e la tipologia di loss (es. Supervised Contrastive Loss).

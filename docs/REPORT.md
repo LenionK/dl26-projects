@@ -415,5 +415,3 @@ Strumenti di IA generativa (es. GitHub Copilot, ChatGPT, Cursor) sono stati util
 Le scelte architetturali (GCN vs GINE, supervised contrastive loss, protocollo di valutazione retrieval, analisi focal point) e la responsabilità dei risultati sono del gruppo.
 
 ---
-
-*Relazione generata a partire dall'analisi del codice sorgente e dei notebook del repository `dl26-projects`.*

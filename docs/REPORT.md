@@ -309,26 +309,158 @@ La funzione `perturb_graph_objects()` mantiene almeno un nodo per grafo e filtra
 
 **File:** `src/utils/GradCAM.py`, `src/utils/GraphGradCAM.py`
 
-| Metodo | Target | Descrizione |
-| :--- | :--- | :--- |
-| GradCAM++ | Baseline CNN | Heatmap sulle regioni dell'immagine rilevanti per l'embedding |
-| Graph Grad-CAM | GCN / GINE | Importanza per nodo calcolata rispetto al **prototipo di classe** (centroide degli embedding) |
-| GNNExplainer | GCN / GINE | Maschera di importanza sugli archi per tipo di relazione |
+#### GradCAM++ — Baseline CNN
 
-Il notebook `notebooks/GraphGradCAM.ipynb` implementa:
-- Confronto GCN vs GINE per importanza nodi per classe.
-- Studio globale delle relazioni più influenti (GINE: per tipo semantico; GCN: per coppia di tipi di nodo).
-- **Focal Point Analysis**: misura quanto la rimozione di un tipo di relazione altera il ranking dei vicini (Ranking Disruption).
+**File:** `src/utils/GradCAM.py`
+
+Per la baseline ResNet-18 si utilizza **GradCAM++**, una variante migliorata di
+GradCAM classico che pesa i gradienti con termini al secondo e terzo ordine,
+producendo heatmap più precise per oggetti multipli nella stessa immagine.
+
+Il meccanismo è il seguente:
+
+1. Forward pass → embedding dell'immagine.
+2. Score scalare calcolato come norma L2 dell'embedding (`embedding.norm().sum()`).
+3. Backward pass → accumulo dei gradienti sull'ultimo layer convoluzionale.
+4. Pesi α calcolati combinando gradienti al secondo e terzo ordine:
+
+```python
+alpha  = dY² / (2·dY² + sum_A·dY³)
+weights = (alpha * ReLU(dY)).sum(dim=(H,W))
+cam    = ReLU((weights * A).sum(dim=C))
+```
+
+```latex
+$$\text{Score} = - ||\text{embedding\_immagine} - \text{prototipo\_classe}||^2$$
+```
+Quest ultima modifica è importante in quanto il classico GRADCAM++ viene usato per la classificazione e misura uno score tra classe target e elemento corrispondente nel vettore in output. Con questa sotituzione nel calcolo dello score lo rendiamo coerente con il metric learning.
+
+
+**Output:** overlay heatmap colorata sull'immagine originale — le zone rosse
+corrispondono alle regioni visive più rilevanti per la costruzione dell'embedding.
+
+#### Graph Grad-CAM — Importanza Nodi (GCN / GINE)
+
+**File:** `src/utils/GraphGradCAM.py` — classe `GraphGradCAM`
+
+Per i modelli a grafo, GradCAM viene adattato per operare sui **nodi** anziché
+sui pixel. La differenza chiave rispetto alla baseline è lo **score**: invece
+della norma dell'embedding si usa il **prodotto scalare con il prototipo della
+classe target**, ovvero il centroide degli embedding di tutti i campioni della
+stessa classe nel validation set:
+
+```python
+prototype = gallery_embs[classe_target].mean(dim=0)   # centroide della classe
+score     = dot(emb, prototype)                        # quanto il grafo è vicino alla classe
+score.backward()
+```
+
+Questa scelta è fondamentale per il metric learning: non esiste un logit di classe
+su cui fare backprop, ma la distanza dal prototipo è il segnale più diretto per
+capire cosa spinge un embedding verso la sua classe.
+
+L'importanza per nodo è calcolata con la formula Grad-CAM standard adattata
+alla dimensione dei nodi:
+
+```python
+alpha            = gradients.mean(dim=0)              # [Feature]
+node_importance  = ReLU(sum(alpha * activations, dim=-1))  # [Num_Nodi]
+node_importance /= node_importance.max()              # normalizzazione [0,1]
+```
+
+I prototipi di classe vengono calcolati tramite `compute_class_prototypes()`,
+che fa la media degli embedding su tutti i campioni del validation set per classe.
+L'analisi viene aggregata su più campioni per classe tramite
+`aggregate_node_importance_by_class()`, producendo un ranking medio dei tipi di
+nodo più discriminativi per ciascuna classe scenica.
+
+**Output:** barplot affiancati GCN vs GINE per classe — permette di confrontare
+quali oggetti i due modelli considerano più rilevanti (es. per *kitchen*:
+*stove*, *refrigerator*, *cabinet*).
+
+#### GNNExplainer — Importanza Archi (GCN / GINE)
+
+**File:** `src/utils/GraphGradCAM.py` — funzioni `analyze_global_edge_importance_with_explainer`,
+`analyze_global_edge_importance_gcn`
+
+Approccio complementare a Grad-CAM: invece di usare i gradienti, **GNNExplainer
+ottimizza una maschera continua sugli archi** per trovare il sottografo minimale
+che preserva l'embedding originale. È configurato in modalità `regression` (corretto
+per metric learning, dove l'output è un vettore e non un logit di classe):
+
+```python
+Explainer(
+    algorithm=GNNExplainer(epochs=200),
+    edge_mask_type="object",    # maschera per arco
+    mode="regression",          # corretto per embedding
+    task_level="graph",
+)
+```
+
+I modelli sono wrappati (`GCNWrapper`, `GINEWrapper`) per adattare la firma
+al formato atteso da GNNExplainer (singolo grafo, senza indice batch).
+
+L'aggregazione delle importanze avviene in modo diverso per i due modelli:
+
+- **GINE**: raggruppa per **tipo semantico della relazione** (`on`, `wearing`,
+  `to the left of`, ecc.) usando `rel_vocab`.
+- **GCN**: raggruppa per **coppia di tipi di nodo sorgente → destinazione**
+  (`person → chair`, `table → plate`, ecc.) poiché non ha vocabolario semantico
+  degli archi. Viene applicato un filtro `min_count` per escludere coppie viste
+  meno di 3 volte, evitando che outlier rari falsino la classifica.
+
+**Output:** barplot delle top-K relazioni più importanti nello spazio latente,
+ordinato per importanza media su tutti i campioni analizzati.
+
+---
 
 ### 6.3 Analisi Focal Point
 
-La **Ranking Disruption** quantifica l'impatto strutturale di ciascuna relazione:
+**File:** `src/utils/GraphGradCAM.py` — funzioni `focal_point_analysis`,
+`robustness_by_relation_type`
+
+L'analisi focal point è lo strumento più originale del modulo di interpretabilità.
+Mentre GNNExplainer misura l'importanza degli archi rispetto all'embedding,
+la focal point analysis misura l'importanza rispetto al **retrieval** — ovvero
+quanto cambia il ranking dei vicini più prossimi quando si rimuove un tipo di
+relazione.
+
+#### Ranking Disruption
+
+Per ogni tipo di relazione nel vocabolario si calcola:
 
 ```
 Disruption = 1 − |top-k(base) ∩ top-k(perturbato)| / k
 ```
 
-Un valore alto indica che quella relazione è un *single point of failure* per il retrieval. L'analisi su GINE ha identificato relazioni spaziali come *to the left of* tra le più critiche.
+dove `top-k(base)` sono i k vicini più prossimi con il grafo intatto e
+`top-k(perturbato)` sono i k vicini dopo aver rimosso tutti gli archi di quel
+tipo di relazione.
+
+- `0.0` → la relazione è irrilevante per il retrieval
+- `1.0` → la relazione ridetermina completamente il ranking (single point of failure)
+
+L'analisi viene eseguita su un sottoinsieme del validation set e i risultati
+vengono aggregati per relazione tramite `focal_point_analysis()`, che restituisce
+una `pd.Series` ordinata per disruption media decrescente.
+
+#### Delta Embedding
+
+La funzione `robustness_by_relation_type()` fornisce una misura complementare:
+invece del ranking, misura il **delta in norma L2 sull'embedding** dopo la
+rimozione di ciascuna relazione. Un delta alto indica che quella relazione
+contribuisce significativamente alla costruzione del vettore embedding.
+
+Le due misure sono complementari: il delta embedding misura l'impatto sulla
+rappresentazione, la ranking disruption misura l'impatto sul retrieval finale.
+Una relazione può spostare molto l'embedding ma non cambiare il ranking (se
+i vicini si spostano tutti nella stessa direzione), oppure cambiare poco
+l'embedding ma ribaltare il ranking (se i vicini sono molto vicini tra loro).
+
+**Output:** l'analisi su GINE ha identificato relazioni spaziali come
+*to the left of* tra le più critiche per il retrieval, suggerendo che
+la posizione relativa degli oggetti è un segnale più discriminante del
+semplice contatto fisico (*on*, *in*) per distinguere classi sceniche.
 
 ---
 

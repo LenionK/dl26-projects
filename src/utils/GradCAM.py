@@ -47,11 +47,22 @@ class GradCAMPlusPlus:
     def _save_gradient(self, module, grad_input, grad_output):
         self.gradients = grad_output[0].detach()
 
-    def __call__(self, x):
+    def __call__(self, x, prototype):
+        """
+        Args:
+            x         : immagine preprocessata [1, C, H, W]
+            prototype : prototipo della classe target [1, D] o [D]
+                        (centroide degli embedding della classe nel validation set)
+        """
         self.model.zero_grad()
 
-        embedding = self.model(x)
-        score     = embedding.norm(dim=1).sum()
+        embedding = self.model(x)                        # [1, D]
+        prototype = prototype.to(x.device).view(1, -1)  # [1, D]
+
+        # Score = proiezione sul prototipo della classe target.
+        # Coerente con GraphGradCAM: misura quanto l'embedding è vicino
+        # alla classe, non quanto è grande in norma.
+        score = torch.mm(embedding, prototype.t()).squeeze()
         score.backward()
 
         A  = self.activations
@@ -76,7 +87,43 @@ class GradCAMPlusPlus:
 
 
 # ---------------------------------------------------------------------------
-# Utility
+# Utility prototipi — coerente con GraphGradCAM.compute_class_prototypes
+# ---------------------------------------------------------------------------
+def compute_prototypes(model, image_paths, labels, device):
+    """
+    Calcola il prototipo (centroide) di ogni classe sugli embedding della gallery.
+
+    Args:
+        model       : EmbeddingNet in eval()
+        image_paths : lista di path alle immagini della gallery
+        labels      : lista/array di label intere corrispondenti
+        device      : torch.device
+
+    Returns:
+        dict { class_id (int) -> tensore 1D [D] }
+    """
+    model.eval()
+    embeddings = []
+    with torch.no_grad():
+        for img_path in image_paths:
+            img = Image.open(img_path).convert("RGB")
+            x   = transform_model(img).unsqueeze(0).to(device)
+            emb = model(x).squeeze(0).cpu()
+            embeddings.append(emb)
+
+    embeddings = torch.stack(embeddings)        # [N, D]
+    labels     = np.array(labels)
+
+    prototypes = {}
+    for cls in np.unique(labels):
+        idx            = np.where(labels == cls)[0]
+        prototypes[cls] = embeddings[idx].mean(dim=0)  # centroide [D]
+
+    return prototypes
+
+
+# ---------------------------------------------------------------------------
+# Utility heatmap
 # ---------------------------------------------------------------------------
 def overlay_heatmap(image_np, cam, alpha=0.5):
     heatmap = cm.jet(cam)[:, :, :3]
@@ -87,18 +134,21 @@ def overlay_heatmap(image_np, cam, alpha=0.5):
     heatmap = np.array(heatmap) / 255.0
     return np.clip(alpha * heatmap + (1 - alpha) * image_np, 0, 1)
 
-def show_gradcam(image_paths, model, target_layer, titles=None, alpha=0.5, cols=4):
-
+def show_gradcam(image_paths, labels, prototypes, model, target_layer,
+                 titles=None, alpha=0.5, cols=4):
     """
-    Visualizza GradCAM++ per una lista di immagini.
+    Visualizza GradCAM++ per una lista di immagini usando il prototipo
+    della classe target come score — coerente con GraphGradCAM.
 
     Args:
-        image_paths  : lista di path alle immagini
-        model        : EmbeddingNet già caricato e in eval()
-        target_layer : layer su cui applicare GradCAM++ (es. model.encoder[-2])
-        titles       : lista di titoli opzionali
-        alpha        : intensità della heatmap (0-1)
-        cols         : numero di colonne nella griglia
+        image_paths : lista di path alle immagini
+        labels      : lista di label intere (una per immagine)
+        prototypes  : dict { class_id -> tensore [D] } da compute_prototypes()
+        model       : EmbeddingNet già caricato e in eval()
+        target_layer: layer su cui applicare GradCAM++ (es. model.encoder[-2])
+        titles      : lista di titoli opzionali
+        alpha       : intensità della heatmap (0-1)
+        cols        : numero di colonne nella griglia
     """
         
     device  = next(model.parameters()).device
@@ -117,8 +167,9 @@ def show_gradcam(image_paths, model, target_layer, titles=None, alpha=0.5, cols=
         x.requires_grad_(True)
         vis_np = transform_vis(img_pil).permute(1, 2, 0).numpy()
 
-        cam     = gradcam(x)[0]
-        overlay = overlay_heatmap(vis_np, cam, alpha)
+        prototype = prototypes[labels[i]].unsqueeze(0)  # [1, D]
+        cam       = gradcam(x, prototype)[0]
+        overlay   = overlay_heatmap(vis_np, cam, alpha)
 
         title = titles[i] if titles else img_path
 

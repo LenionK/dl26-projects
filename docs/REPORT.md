@@ -175,6 +175,81 @@ La loss principale è la **Supervised Contrastive Loss** con temperatura:
 
 Il **BalancedBatchSampler** campiona equamente le classi presenti nel batch, essenziale per la contrastive loss che richiede almeno un positivo per campione. I checkpoint salvano `model_state_dict`, `optimizer_state_dict`, `loss_history`, e per i modelli a grafo anche `node_vocab` e `rel_vocab`.
 
+### Motivazioni delle Scelte di Ottimizzazione
+
+Le scelte di ottimizzatore, scheduler e gradient clipping non sono casuali ma 
+rispondono a un problema comune: il dataset di training contiene **label rumorose**, 
+generate automaticamente da CLIP. Un'etichetta errata introduce un segnale di 
+supervisione sbagliato che può destabilizzare il training in modi diversi, 
+e ciascuna delle scelte adottate mitiga uno specifico aspetto di questo problema.
+
+**Adam con Weight Decay**
+
+Adam è stato scelto come ottimizzatore per la sua capacità di adattare il learning 
+rate per ogni parametro in base alla storia dei gradienti, rendendolo più stabile 
+rispetto a SGD vanilla in presenza di gradienti irregolari — condizione frequente 
+quando alcune label sono errate. Il `weight_decay=1e-4` aggiunge una penalità 
+sui pesi grandi, limitando la capacità del modello di memorizzare esempi rumorosi 
+e spingendolo verso soluzioni più generali. In presenza di label sbagliate, un 
+modello senza regolarizzazione tenderebbe ad overfittare il rumore anziché 
+apprendere la struttura semantica sottostante.
+
+**CosineAnnealingLR**
+
+Lo scheduler riduce il learning rate seguendo una curva a coseno, da `lr_max` 
+fino a `lr * 0.05` (5% del valore iniziale). Questo comportamento ha due effetti 
+complementari in presenza di rumore:
+
+- Nella fase iniziale, il learning rate alto permette al modello di **esplorare 
+  ampiamente** lo spazio dei parametri, evitando di convergere prematuramente 
+  su minimi locali indotti da label sbagliate.
+- Nella fase finale, il learning rate basso permette di **affinare la convergenza** 
+  su strutture corrette, riducendo l'influenza degli outlier rumorosi che 
+  producono gradienti instabili.
+
+Un learning rate fisso non offre questo compromesso: o è troppo alto e non converge, 
+o è troppo basso e rimane bloccato in minimi locali causati dal rumore.
+
+**Gradient Clipping (max_norm=1.0)**
+
+**Gradient Clipping (max_norm=1.0)**
+
+Un esempio con label errata può generare un gradiente molto grande: il modello
+riceve un segnale di supervisione sbagliato e tenta di correggere aggressivamente
+i parametri per soddisfarlo. Questo problema è amplificato dalla natura della
+Supervised Contrastive Loss, che calcola il gradiente **su tutto il batch
+simultaneamente**. Se un batch contiene più esempi con label errate concentrati
+sulla stessa classe — condizione plausibile con il BalancedGraphBatchSampler che
+forza 4 campioni per classe e con classi visivamente simili come *bedroom* vs
+*living room* — si verificano due errori che si sommano nel gradiente finale:
+
+- **Falsi positivi**: esempi di classi diverse vengono trattati come positivi,
+  il modello cerca di avvicinarli nello spazio embedding quando non dovrebbe.
+- **Falsi negativi**: esempi della stessa classe vengono trattati come negativi,
+  il modello cerca di allontanarli quando non dovrebbe.
+
+Il risultato è un gradiente molto grande e nella direzione sbagliata. Senza
+clipping, questo produce un passo enorme che sposta i parametri lontano da una
+buona soluzione; il batch successivo (più pulito) deve correggere il danno,
+rendendo il training instabile. Clippare la norma L2 a `1.0` limita il danno
+che un cluster di esempi rumorosi può arrecare in un singolo step, lasciando
+al training successivo la possibilità di correggere gradualmente.
+
+
+**Sinergia tra le tre scelte**
+
+| Tecnica | Problema affrontato |
+| :--- | :--- |
+| Adam + weight decay | Evita memorizzazione del rumore, regolarizza i pesi |
+| CosineAnnealingLR | Esplora prima, converge su strutture corrette dopo |
+| Gradient clipping | Limita il danno di singoli esempi con label errate |
+
+Le tre tecniche agiscono su livelli diversi dello stesso problema: 
+il weight decay interviene sulla **capacità** del modello, lo scheduler 
+sulla **traiettoria** di ottimizzazione, il gradient clipping sulla 
+**stabilità** dei singoli aggiornamenti. La loro combinazione rende 
+il training robusto al rumore introdotto dall'etichettatura automatica via CLIP.
+
 **Comandi di training:**
 
 ```bash

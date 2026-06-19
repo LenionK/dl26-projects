@@ -128,25 +128,35 @@ def compute_class_prototypes(gallery_embs, df_labels):
 # Wrapper modelli per GNNExplainer
 # ---------------------------------------------------------------------------
 class GCNWrapper(torch.nn.Module):
-    """Wrapper GCN per GNNExplainer: assume un singolo grafo (no batch)."""
-    def __init__(self, model):
+    """Wrapper GCN per GNNExplainer: calcola lo score scalare rispetto a un prototipo."""
+    def __init__(self, model, prototype):
         super().__init__()
         self.model = model
+        # Forziamo il prototipo a forma [1, Dimensioni_Embedding]
+        self.prototype = prototype.detach().clone().view(1, -1)
 
     def forward(self, x, edge_index):
         batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
-        return self.model(x, edge_index, batch)
+        emb = self.model(x, edge_index, batch).view(1, -1)
+        # Prodotto scalare per ottenere uno scalare (vicinanza al prototipo)
+        score = torch.mm(emb, self.prototype.to(x.device).t()).squeeze(0)
+        return score
 
 
 class GINEWrapper(torch.nn.Module):
-    """Wrapper GINE per GNNExplainer: assume un singolo grafo (no batch)."""
-    def __init__(self, model):
+    """Wrapper GINE per GNNExplainer: calcola lo score scalare rispetto a un prototipo."""
+    def __init__(self, model, prototype):
         super().__init__()
         self.model = model
+        # Forziamo il prototipo a forma [1, Dimensioni_Embedding]
+        self.prototype = prototype.detach().clone().view(1, -1)
 
     def forward(self, x, edge_index, edge_attr):
         batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
-        return self.model(x, edge_index, edge_attr, batch, num_graphs=1)
+        emb = self.model(x, edge_index, edge_attr, batch, num_graphs=1).view(1, -1)
+        # Prodotto scalare per ottenere uno scalare (vicinanza al prototipo)
+        score = torch.mm(emb, self.prototype.to(x.device).t()).squeeze(0)
+        return score
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +164,7 @@ class GINEWrapper(torch.nn.Module):
 # ---------------------------------------------------------------------------
 def build_explainer(wrapped_model, epochs=200):
     """
-    Crea un Explainer GNNExplainer per un modello wrappato.
-
-    Nota: mode="regression" è corretto perché i modelli producono un embedding
-    vettoriale (metric learning). GNNExplainer ottimizza la maschera rispetto
-    alla singola coordinata indicata da target_class.
+    Crea un Explainer GNNExplainer per il modello proiettato sul prototipo.
     """
     return Explainer(
         model=wrapped_model,
@@ -717,7 +723,147 @@ def focal_point_analysis(model, dataset, gallery_embs, rel_vocab, device,
 
     return pd.Series(results).sort_values(ascending=False)
 
+def focal_point_analysis_gcn(model, dataset, gallery_embs, node_vocab, device,
+                              topk=10, num_samples=None, min_edge_count=3):
+    
+    gallery_embs = gallery_embs.to(device)
+    samples = list(dataset)
+    if num_samples is not None:
+        samples = samples[:num_samples]
 
+    idx2node = {v: k for k, v in node_vocab.items()}
+    unique_relations = set()
+    for data in samples:
+        node_types = data.x[:, 0].long().cpu().numpy()
+        src_nodes  = data.edge_index[0].cpu().numpy()
+        dst_nodes  = data.edge_index[1].cpu().numpy()
+        for s, d in zip(src_nodes, dst_nodes):
+            type_src = idx2node.get(int(node_types[s]), f"Node_{node_types[s]}")
+            type_dst = idx2node.get(int(node_types[d]), f"Node_{node_types[d]}")
+            unique_relations.add((type_src, type_dst))
+
+    results = {}
+
+    for type_src_target, type_dst_target in unique_relations:
+        rel_name = f"{type_src_target} → {type_dst_target}"
+        disruptions = []
+
+        for i, data in enumerate(samples):
+            data = data.to(device)
+            node_types = data.x[:, 0].long().cpu().numpy()
+            src_nodes  = data.edge_index[0].cpu().numpy()
+            dst_nodes  = data.edge_index[1].cpu().numpy()
+
+            # Conta quanti archi di questo tipo ci sono nel grafo
+            edges_to_remove = [
+                idx_e for idx_e, (s, d) in enumerate(zip(src_nodes, dst_nodes))
+                if idx2node.get(int(node_types[s])) == type_src_target
+                and idx2node.get(int(node_types[d])) == type_dst_target
+            ]
+            
+            # FIX 1: salta se la relazione non è presente o rimuove troppi archi
+            n_total = data.edge_index.size(1)
+            if len(edges_to_remove) == 0:
+                continue
+            if (n_total - len(edges_to_remove)) < min_edge_count:
+                continue
+
+            mask = torch.ones(n_total, dtype=torch.bool, device=device)
+            for idx_e in edges_to_remove:
+                mask[idx_e] = False
+
+            # FIX 2: escludi la query stessa dalla gallery per il ranking
+            gallery_without_self = torch.cat([
+                gallery_embs[:i], gallery_embs[i+1:]
+            ], dim=0)
+
+            base_emb  = get_embedding(model, data, device, model_type="gcn")
+            base_rank = set(get_topk_neighbors(base_emb, gallery_without_self, topk))
+
+            data_pert            = data.clone()
+            data_pert.edge_index = data.edge_index[:, mask]
+
+            pert_emb  = get_embedding(model, data_pert, device, model_type="gcn")
+            pert_rank = set(get_topk_neighbors(pert_emb, gallery_without_self, topk))
+
+            overlap = len(base_rank & pert_rank) / topk
+            disruptions.append(1.0 - overlap)
+
+        # FIX 3: richiedi un minimo di campioni validi per la stima
+        if len(disruptions) >= 5:
+            results[rel_name] = float(np.mean(disruptions))
+
+    return pd.Series(results).sort_values(ascending=False)
+
+# ---------------------------------------------------------------------------
+# Robustezza per tipo di relazione — delta embedding per GCN
+# ---------------------------------------------------------------------------
+def robustness_by_relation_type_gcn(model, dataset, node_vocab, device,
+                                     num_samples=None):
+    """
+    Per ogni coppia di tipi di nodo (Src → Dst), rimuove tutti gli archi
+    di quel tipo da ciascun grafo e misura il delta in norma L2 sull'embedding.
+
+    Un delta alto indica che quella transizione strutturale è critica
+    per la stabilità dell'embedding del modello (single point of failure).
+    """
+    samples = list(dataset)
+    if num_samples is not None:
+        samples = samples[:num_samples]
+
+    idx2node = {v: k for k, v in node_vocab.items()}
+    
+    # 1. Identifichiamo tutte le relazioni (coppie Src -> Dst) uniche nei campioni
+    unique_relations = set()
+    for data in samples:
+        node_types = data.x[:, 0].long().cpu().numpy()
+        src_nodes  = data.edge_index[0].cpu().numpy()
+        dst_nodes  = data.edge_index[1].cpu().numpy()
+        for s, d in zip(src_nodes, dst_nodes):
+            type_src = idx2node.get(int(node_types[s]), f"Node_{node_types[s]}")
+            type_dst = idx2node.get(int(node_types[d]), f"Node_{node_types[d]}")
+            unique_relations.add((type_src, type_dst))
+
+    results = {}
+
+    # 2. Ablazione selettiva e calcolo del Delta L2
+    for type_src_target, type_dst_target in unique_relations:
+        rel_name = f"{type_src_target} → {type_dst_target}"
+        deltas = []
+
+        for data in samples:
+            data = data.to(device)
+            node_types = data.x[:, 0].long().cpu().numpy()
+            src_nodes  = data.edge_index[0].cpu().numpy()
+            dst_nodes  = data.edge_index[1].cpu().numpy()
+
+            # Embedding di riferimento (base)
+            base_emb = get_embedding(model, data, device, model_type="gcn")
+
+            # Maschera booleana per escludere la relazione target
+            mask = torch.ones(data.edge_index.size(1), dtype=torch.bool, device=device)
+            for idx_edge, (s, d) in enumerate(zip(src_nodes, dst_nodes)):
+                type_src = idx2node.get(int(node_types[s]), f"Node_{node_types[s]}")
+                type_dst = idx2node.get(int(node_types[d]), f"Node_{node_types[d]}")
+                if type_src == type_src_target and type_dst == type_dst_target:
+                    mask[idx_edge] = False
+
+            # Saltiamo se l'arco non era presente o se rimuoverlo isola completamente il grafo
+            if mask.sum() == mask.size(0) or mask.sum() < 2:
+                continue
+
+            # Generiamo il grafo perturbato
+            data_pert            = data.clone()
+            data_pert.edge_index = data.edge_index[:, mask]
+
+            # Calcolo embedding perturbato e calcolo dello spostamento geometrico (Delta L2)
+            pert_emb = get_embedding(model, data_pert, device, model_type="gcn")
+            deltas.append(torch.norm(base_emb - pert_emb).item())
+
+        if deltas:
+            results[rel_name] = float(np.mean(deltas))
+
+    return pd.Series(results).sort_values(ascending=False)
 
 # ---------------------------------------------------------------------------
 # Plot distribuzione disruption per una singola relazione

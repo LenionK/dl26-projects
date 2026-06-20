@@ -212,8 +212,6 @@ o è troppo basso e rimane bloccato in minimi locali causati dal rumore.
 
 **Gradient Clipping (max_norm=1.0)**
 
-**Gradient Clipping (max_norm=1.0)**
-
 Un esempio con label errata può generare un gradiente molto grande: il modello
 riceve un segnale di supervisione sbagliato e tenta di correggere aggressivamente
 i parametri per soddisfarlo. Questo problema è amplificato dalla natura della
@@ -320,21 +318,20 @@ producendo heatmap più precise per oggetti multipli nella stessa immagine.
 Il meccanismo è il seguente:
 
 1. Forward pass → embedding dell'immagine.
-2. Score scalare calcolato come norma L2 dell'embedding (`embedding.norm().sum()`).
+2. Score scalare calcolato come **prodotto scalare tra l'embedding e il prototipo della classe target** — il centroide degli embedding di tutti i campioni della stessa classe nel training set.
 3. Backward pass → accumulo dei gradienti sull'ultimo layer convoluzionale.
 4. Pesi α calcolati combinando gradienti al secondo e terzo ordine:
 
 ```python
-alpha  = dY² / (2·dY² + sum_A·dY³)
+score   = dot(embedding, prototype)           # proiezione sul prototipo
+alpha   = dY² / (2·dY² + sum_A·dY³)
 weights = (alpha * ReLU(dY)).sum(dim=(H,W))
-cam    = ReLU((weights * A).sum(dim=C))
+cam     = ReLU((weights * A).sum(dim=C))
 ```
 
-```latex
-$$\text{Score} = - ||\text{embedding\_immagine} - \text{prototipo\_classe}||^2$$
-```
-Quest ultima modifica è importante in quanto il classico GRADCAM++ viene usato per la classificazione e misura uno score tra classe target e elemento corrispondente nel vettore in output. Con questa sotituzione nel calcolo dello score lo rendiamo coerente con il metric learning.
+Questa scelta dello score è fondamentale per la coerenza con il paradigma di metric learning: GradCAM++ classico è progettato per la classificazione e usa il logit della classe target come score scalare, che non esiste in un sistema metric learning. Sostituirlo con il prodotto scalare `dot(embedding, prototipo)` misura direttamente quanto l'embedding dell'immagine è orientato verso il centroide della classe, che è esattamente il segnale ottimizzato dalla Supervised Contrastive Loss durante il training. Questa scelta rende inoltre GradCAM++ sulla baseline **semanticamente coerente** con il Graph Grad-CAM sui modelli a grafo, che usa lo stesso score scalare.
 
+I prototipi vengono calcolati sul **training set** tramite `compute_prototypes()` in `src/utils/GradCAM.py`, in modo analogo a `compute_class_prototypes()` in `GraphGradCAM.py`, garantendo che non ci sia data leakage dalla gallery di validazione.
 
 **Output:** overlay heatmap colorata sull'immagine originale — le zone rosse
 corrispondono alle regioni visive più rilevanti per la costruzione dell'embedding.
@@ -384,21 +381,37 @@ quali oggetti i due modelli considerano più rilevanti (es. per *kitchen*:
 `analyze_global_edge_importance_gcn`
 
 Approccio complementare a Grad-CAM: invece di usare i gradienti, **GNNExplainer
-ottimizza una maschera continua sugli archi** per trovare il sottografo minimale
-che preserva l'embedding originale. È configurato in modalità `regression` (corretto
-per metric learning, dove l'output è un vettore e non un logit di classe):
+ottimizza una maschera continua sugli archi** `m_e ∈ [0,1]` per trovare il sottografo minimale
+che preserva l'output originale. La maschera entra moltiplicando i messaggi sugli archi durante la forward pass mascherata:
 
-```python
-Explainer(
-    algorithm=GNNExplainer(epochs=200),
-    edge_mask_type="object",    # maschera per arco
-    mode="regression",          # corretto per embedding
-    task_level="graph",
-)
+```
+h_v = AGG( { m_{u→v} · W · h_u  ∀u ∈ N(v) } )
 ```
 
-I modelli sono wrappati (`GCNWrapper`, `GINEWrapper`) per adattare la firma
-al formato atteso da GNNExplainer (singolo grafo, senza indice batch).
+minimizzando la loss:
+
+```
+L = − MI(Y, G_S) + λ · Ω(M)
+```
+
+dove il primo termine massimizza la fedeltà dell'output sul sottografo mascherato e il secondo penalizza maschere dense (sparsità).
+
+A differenza di una classificazione standard, il task è metric learning e l'output è un vettore embedding — non un logit di classe. Per questo motivo lo score scalare che guida l'ottimizzazione della maschera è il **prodotto scalare tra embedding e prototipo della classe target**, identico a quello usato in Graph Grad-CAM:
+
+```python
+# GINEWithPrototype / GCNWithPrototype
+score = dot(emb, prototype)   # [1, 1] — proiezione sul centroide della classe
+```
+
+I modelli sono wrappati in `GCNWithPrototype` e `GINEWithPrototype`, che registrano il prototipo come buffer non-learnable e restituiscono lo score scalare. L'explainer viene costruito tramite `build_explainer_with_prototype()`:
+
+```python
+build_explainer_with_prototype(model, prototype, model_type="gine", epochs=200)
+```
+
+Questa scelta garantisce che GNNExplainer ottimizzi la maschera rispetto all'**intera geometria dello spazio latente** — non a una singola coordinata dell'embedding come nel caso della modalità `regression` standard — producendo spiegazioni semanticamente coerenti con il Graph Grad-CAM e con la Supervised Contrastive Loss.
+
+Se il prototipo non è disponibile, le funzioni ricadono automaticamente sul comportamento precedente (`GCNWrapper` / `GINEWrapper` senza prototipo) emettendo un `UserWarning`.
 
 L'aggregazione delle importanze avviene in modo diverso per i due modelli:
 
@@ -417,7 +430,7 @@ ordinato per importanza media su tutti i campioni analizzati.
 ### 6.3 Analisi Focal Point
 
 **File:** `src/utils/GraphGradCAM.py` — funzioni `focal_point_analysis`,
-`robustness_by_relation_type`
+`focal_point_analysis_gcn`, `robustness_by_relation_type`, `robustness_by_relation_type_gcn`
 
 L'analisi focal point è lo strumento più originale del modulo di interpretabilità.
 Mentre GNNExplainer misura l'importanza degli archi rispetto all'embedding,
@@ -435,14 +448,15 @@ Disruption = 1 − |top-k(base) ∩ top-k(perturbato)| / k
 
 dove `top-k(base)` sono i k vicini più prossimi con il grafo intatto e
 `top-k(perturbato)` sono i k vicini dopo aver rimosso tutti gli archi di quel
-tipo di relazione.
+tipo di relazione. La query viene esclusa dalla gallery prima del confronto per
+evitare che la distanza nulla da se stessa distorca il ranking.
 
 - `0.0` → la relazione è irrilevante per il retrieval
 - `1.0` → la relazione ridetermina completamente il ranking (single point of failure)
 
-L'analisi viene eseguita su un sottoinsieme del validation set e i risultati
-vengono aggregati per relazione tramite `focal_point_analysis()`, che restituisce
-una `pd.Series` ordinata per disruption media decrescente.
+Vengono incluse solo relazioni con almeno 5 campioni validi (grafi che contengono
+quella relazione e che dopo la rimozione hanno ancora almeno 3 archi residui),
+per evitare stime instabili su relazioni rarissime.
 
 #### Delta Embedding
 
@@ -451,16 +465,46 @@ invece del ranking, misura il **delta in norma L2 sull'embedding** dopo la
 rimozione di ciascuna relazione. Un delta alto indica che quella relazione
 contribuisce significativamente alla costruzione del vettore embedding.
 
-Le due misure sono complementari: il delta embedding misura l'impatto sulla
-rappresentazione, la ranking disruption misura l'impatto sul retrieval finale.
-Una relazione può spostare molto l'embedding ma non cambiare il ranking (se
-i vicini si spostano tutti nella stessa direzione), oppure cambiare poco
-l'embedding ma ribaltare il ranking (se i vicini sono molto vicini tra loro).
+Le due misure sono complementari e catturano fenomeni diversi:
 
-**Output:** l'analisi su GINE ha identificato relazioni spaziali come
-*to the left of* tra le più critiche per il retrieval, suggerendo che
-la posizione relativa degli oggetti è un segnale più discriminante del
-semplice contatto fisico (*on*, *in*) per distinguere classi sceniche.
+| Scenario | Delta L2 | Disruption | Interpretazione |
+| :--- | :---: | :---: | :--- |
+| Alto | Alta | Relazione davvero critica in tutto |
+| Alto | Bassa | Spostamento in direzione non discriminativa |
+| Basso | Alta | Piccolo spostamento ma in zona di confine tra classi |
+| Basso | Bassa | Relazione irrilevante |
+
+#### Risultati
+
+**GINE** — le due metriche sono fortemente allineate, con la stessa gerarchia di relazioni in entrambe le classifiche:
+
+| Relazione | Delta L2 | Disruption |
+| :--- | :---: | :---: |
+| to the left of | 0.102 | 0.543 |
+| to the right of | 0.091 | 0.486 |
+| on | 0.051 | 0.246 |
+| wearing | 0.020 | 0.129 |
+| in | 0.023 | 0.121 |
+
+L'allineamento tra le due metriche in GINE indica che lo spazio latente è regolare: ogni spostamento significativo dell'embedding si traduce in un cambio reale del ranking. Le relazioni critiche sono relazioni spaziali generiche (`to the left of`, `to the right of`) che appaiono in centinaia di grafi e strutturano la geometria complessiva della scena.
+
+**GCN** — le due metriche sono invece **dissociate**:
+
+| Top Delta L2 | Top Disruption |
+| :--- | :--- |
+| airplane → fan (0.850) | leaves → tree (0.517) |
+| ottoman → chair (0.445) | person → shirt (0.400) |
+| wall → tiles (0.436) | sky → clouds (0.367) |
+| sailboat → lighthouse (0.399) | shirt → person (0.320) |
+| lighthouse → sailboat (0.378) | clouds → sky (0.300) |
+
+Le relazioni con alto Delta L2 sono specifiche e rare — producono grandi spostamenti dell'embedding in direzioni isolate dello spazio latente dove non ci sono altri grafi vicini, quindi il retrieval non cambia. Le relazioni con alta Disruption sono comuni e strutturalmente pervasive (`person → shirt`, `sky → clouds`) — spostano poco l'embedding in valore assoluto ma lo portano verso zone affollate dello spazio latente, cambiando i vicini recuperati.
+
+Questo comportamento è coerente con il fatto che GCN non ha accesso ai tipi di arco espliciti: deve inferire il significato della relazione dalla coppia di tipi di nodo agli estremi. Le coppie rare identificano univocamente una scena ma la posizionano in una regione isolata; le coppie comuni organizzano i cluster condivisi tra molti grafi.
+
+La tabella GCN mostra anche che le relazioni critiche per il Disruption compaiono in entrambe le direzioni (`leaves → tree` e `tree → leaves`, `sky → clouds` e `clouds → sky`), con importanze asimmetriche — confermando che GCN tratta il grafo come diretto e la direzione porta informazione indipendente.
+
+**Output:** `pd.Series` / `pd.DataFrame` ordinati per metrica decrescente, con filtraggio per numero minimo di campioni validi.
 
 ---
 
@@ -507,6 +551,22 @@ Degradazione delle performance al crescere della probabilità di rimozione nodi:
 Come riportato in Sez. 7.1, la baseline ResNet-18 ottiene in pratica le metriche di retrieval più alte tra i tre modelli (acc@1 = 62.31%, mAP = 68.00%). Questo risultato è in parte spiegabile dal modo in cui sono state generate le etichette di classe (Sez. 3.3): le 14 classi sceniche derivano da prompt CLIP basati sull'**aspetto visivo complessivo** della scena (es. *a beach scene*, *a kitchen interior*), un segnale che una CNN pre-addestrata su ImageNet è naturalmente molto efficace a catturare. I modelli a grafo, al contrario, ricevono solo informazione strutturale (oggetti e relazioni) e devono inferire la classe scenica da quella sola struttura, perdendo per costruzione l'informazione di colore, texture e illuminazione che ha contribuito a definire l'etichetta stessa.
 
 Questo non invalida l'ipotesi di partenza sul valore dei scene graph, ma suggerisce che, con etichette di classe definite in base all'aspetto visivo, il confronto è strutturalmente favorevole alla baseline. Il vantaggio dei modelli a grafo è più plausibile su task dove la similarità "vera" è definita dalla composizione semantica (stessi oggetti/relazioni) indipendentemente dall'appearance — condizione che andrebbe verificata con etichette di classe costruite direttamente sulla struttura del grafo piuttosto che su CLIP visivo (cfr. Sez. 8).
+
+### 7.4 Interpretabilità — Sintesi dei Risultati
+
+L'analisi di interpretabilità ha prodotto tre tipi di evidenza complementari.
+
+**Graph Grad-CAM (importanza nodi):** i prototipi di classe vengono calcolati sul training set tramite `compute_class_prototypes()` e usati come score scalare per il backward pass, in modo coerente con la Supervised Contrastive Loss. Lo stesso schema è adottato da GradCAM++ sulla baseline CNN tramite `compute_prototypes()` in `GradCAM.py`, garantendo confrontabilità tra i tre modelli.
+
+**GNNExplainer (importanza archi):** l'ottimizzazione della maschera è guidata dal prodotto scalare `dot(emb, prototipo)` invece che da una singola coordinata dell'embedding. Questo è implementato nei wrapper `GCNWithPrototype` e `GINEWithPrototype` e garantisce che GNNExplainer operi sull'intera geometria dello spazio latente.
+
+**Focal Point Analysis:** il confronto tra Delta L2 e Ranking Disruption ha rivelato un comportamento strutturalmente diverso tra i due modelli a grafo:
+
+- **GINE**: le due metriche sono allineate (le stesse relazioni spaziali dominano entrambe le classifiche). Lo spazio latente è regolare — ogni spostamento significativo si traduce in un cambio reale del retrieval. Le relazioni critiche sono relazioni spaziali generiche (`to the left of`, `to the right of`) che strutturano la geometria complessiva della scena.
+
+- **GCN**: le due metriche sono dissociate. Le relazioni con alto Delta L2 sono specifiche e rare (producono grandi spostamenti in direzioni isolate dello spazio latente, senza cambiare i vicini); le relazioni con alta Disruption sono comuni e part-whole (`person → shirt`, `leaves → tree`, `sky → clouds`), che spostano poco l'embedding ma lo portano verso zone affollate cambiando il ranking.
+
+Questo risultato è interpretabile alla luce delle architetture: GCN, non avendo accesso ai tipi di arco espliciti, usa le coppie di tipi di nodo come proxy per il significato della relazione. Le coppie rare identificano univocamente una scena ma la posizionano in regioni isolate; le coppie comuni organizzano i cluster condivisi. GINE invece, avendo i tipi di arco come feature esplicite, costruisce uno spazio latente più regolare dove Delta L2 e Disruption sono naturalmente allineati.
 
 ---
 

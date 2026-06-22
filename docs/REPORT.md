@@ -476,33 +476,47 @@ Le due misure sono complementari e catturano fenomeni diversi:
 
 #### Risultati
 
+Entrambe le analisi sono condotte su **140 campioni stratificati (10 per classe)**, garantendo una rappresentazione bilanciata di tutte le 14 classi sceniche. Questo campionamento stratificato è fondamentale: un campionamento casuale non bilanciato sovrarappresenterebbe le classi più popolose (es. *bedroom*), distorcendo le importanze verso le relazioni tipiche di quelle scene e rendendo i risultati non comparabili tra classi. Il bilanciamento garantisce invece che le relazioni emergano come critiche per l'intera distribuzione delle scene, non per un sottoinsieme dominante.
+
 **GINE** — le due metriche sono fortemente allineate, con la stessa gerarchia di relazioni in entrambe le classifiche:
 
-| Relazione | Delta L2 | Disruption |
+| Relazione | Disruption (Ranking) | Delta L2 (Embedding) |
 | :--- | :---: | :---: |
-| to the left of | 0.102 | 0.543 |
-| to the right of | 0.091 | 0.486 |
-| on | 0.051 | 0.246 |
-| wearing | 0.020 | 0.129 |
-| in | 0.023 | 0.121 |
+| to the left of | 0.480 | 0.101 |
+| to the right of | 0.448 | 0.089 |
+| on | 0.219 | 0.054 |
+| in | 0.121 | 0.033 |
+| wearing | 0.094 | 0.016 |
+| near | 0.061 | 0.009 |
+| of | 0.060 | 0.010 |
+| in front of | 0.030 | — |
+| below | 0.030 | 0.006 |
+| above | 0.030 | 0.009 |
 
-L'allineamento tra le due metriche in GINE indica che lo spazio latente è regolare: ogni spostamento significativo dell'embedding si traduce in un cambio reale del ranking. Le relazioni critiche sono relazioni spaziali generiche (`to the left of`, `to the right of`) che appaiono in centinaia di grafi e strutturano la geometria complessiva della scena.
+L'allineamento tra le due metriche in GINE indica che lo spazio latente è regolare: ogni spostamento significativo dell'embedding si traduce in un cambio reale del ranking. Le relazioni critiche sono relazioni spaziali generiche (`to the left of`, `to the right of`) che appaiono in centinaia di grafi e strutturano la geometria complessiva della scena. Grazie al campionamento stratificato, questo risultato riflette una preferenza strutturale del modello e non un artefatto della distribuzione sbilanciata.
 
 **GCN** — le due metriche sono invece **dissociate**:
 
-| Top Delta L2 | Top Disruption |
-| :--- | :--- |
-| airplane → fan (0.850) | leaves → tree (0.517) |
-| ottoman → chair (0.445) | person → shirt (0.400) |
-| wall → tiles (0.436) | sky → clouds (0.367) |
-| sailboat → lighthouse (0.399) | shirt → person (0.320) |
-| lighthouse → sailboat (0.378) | clouds → sky (0.300) |
+| Rango | Top Disruption (Ranking) | Importanza | Top Delta L2 (Embedding) | Importanza |
+| :---: | :--- | :---: | :--- | :---: |
+| 1 | leaves → tree | 0.700 | airplane → fan | 0.666 |
+| 2 | sky → cloud | 0.560 | fan → airplane | 0.652 |
+| 3 | cloud → sky | 0.540 | dishwasher → counter | 0.575 |
+| 4 | tree → leaves | 0.540 | cat → chair | 0.561 |
+| 5 | clouds → sky | 0.433 | beach → horse | 0.554 |
+| 6 | sky → clouds | 0.400 | horse → beach | 0.545 |
+| 7 | water → boat | 0.360 | counter → dishwasher | 0.503 |
+| 8 | hand → wall | 0.360 | bed → kettle | 0.487 |
+| 9 | wall → hair | 0.340 | chair → cat | 0.484 |
+| 10 | boat → water | 0.340 | ottoman → chair | 0.459 |
 
-Le relazioni con alto Delta L2 sono specifiche e rare — producono grandi spostamenti dell'embedding in direzioni isolate dello spazio latente dove non ci sono altri grafi vicini, quindi il retrieval non cambia. Le relazioni con alta Disruption sono comuni e strutturalmente pervasive (`person → shirt`, `sky → clouds`) — spostano poco l'embedding in valore assoluto ma lo portano verso zone affollate dello spazio latente, cambiando i vicini recuperati.
+La dissociazione tra le due metriche è netta e interpretabile. Le relazioni con alto **Delta L2** sono specifiche e rare (coppie insolite come `airplane → fan`, `beach → horse`, `bed → kettle`) — producono grandi spostamenti dell'embedding in direzioni isolate dello spazio latente, dove non ci sono altri grafi vicini, quindi il retrieval non cambia. Le relazioni con alta **Disruption** sono invece coppie part-whole comuni e pervasive (`leaves → tree`, `sky → clouds`, `water → boat`) — spostano l'embedding di poco in valore assoluto ma lo portano verso zone affollate dello spazio latente, cambiando i vicini recuperati.
+
+Grazie al campionamento stratificato, la classifica Disruption non è dominata da relazioni tipiche delle sole classi più popolose: coppie come `water → boat` e `hand → wall`, che appartengono a classi sceniche meno frequenti (paesaggi acquatici, interni), emergono comunque come strutturalmente critiche per il retrieval del GCN, a riprova che il bilanciamento permette di rilevare relazioni discriminative trasversali all'intera distribuzione.
 
 Questo comportamento è coerente con il fatto che GCN non ha accesso ai tipi di arco espliciti: deve inferire il significato della relazione dalla coppia di tipi di nodo agli estremi. Le coppie rare identificano univocamente una scena ma la posizionano in una regione isolata; le coppie comuni organizzano i cluster condivisi tra molti grafi.
 
-La tabella GCN mostra anche che le relazioni critiche per il Disruption compaiono in entrambe le direzioni (`leaves → tree` e `tree → leaves`, `sky → clouds` e `clouds → sky`), con importanze asimmetriche — confermando che GCN tratta il grafo come diretto e la direzione porta informazione indipendente.
+La classifica Disruption del GCN mostra anche che le relazioni critiche compaiono sistematicamente in entrambe le direzioni (`leaves → tree` e `tree → leaves`, `sky → clouds` e `clouds → sky`, `water → boat` e `boat → water`), con importanze asimmetriche — confermando che GCN tratta il grafo come diretto e che la direzione dell'arco porta informazione indipendente.
 
 **Output:** `pd.Series` / `pd.DataFrame` ordinati per metrica decrescente, con filtraggio per numero minimo di campioni validi.
 
@@ -560,11 +574,11 @@ L'analisi di interpretabilità ha prodotto tre tipi di evidenza complementari.
 
 **GNNExplainer (importanza archi):** l'ottimizzazione della maschera è guidata dal prodotto scalare `dot(emb, prototipo)` invece che da una singola coordinata dell'embedding. Questo è implementato nei wrapper `GCNWithPrototype` e `GINEWithPrototype` e garantisce che GNNExplainer operi sull'intera geometria dello spazio latente.
 
-**Focal Point Analysis:** il confronto tra Delta L2 e Ranking Disruption ha rivelato un comportamento strutturalmente diverso tra i due modelli a grafo:
+**Focal Point Analysis:** l'analisi è stata condotta su **140 campioni stratificati (10 per classe)** per entrambi i modelli, garantendo che le relazioni emergano come critiche su tutta la distribuzione delle scene e non solo per le classi più popolose. Il confronto tra Delta L2 e Ranking Disruption ha rivelato un comportamento strutturalmente diverso tra i due modelli a grafo:
 
-- **GINE**: le due metriche sono allineate (le stesse relazioni spaziali dominano entrambe le classifiche). Lo spazio latente è regolare — ogni spostamento significativo si traduce in un cambio reale del retrieval. Le relazioni critiche sono relazioni spaziali generiche (`to the left of`, `to the right of`) che strutturano la geometria complessiva della scena.
+- **GINE**: le due metriche sono allineate — la stessa gerarchia di relazioni spaziali (`to the left of` con Disruption 0.480 e Delta L2 0.101, `to the right of` con 0.448 / 0.089) domina entrambe le classifiche. Lo spazio latente è regolare: ogni spostamento significativo dell'embedding si traduce in un cambio reale del retrieval. Il campionamento stratificato conferma che questa preferenza per le relazioni spaziali generiche è trasversale a tutte le classi sceniche, non un effetto delle sole scene più rappresentate.
 
-- **GCN**: le due metriche sono dissociate. Le relazioni con alto Delta L2 sono specifiche e rare (producono grandi spostamenti in direzioni isolate dello spazio latente, senza cambiare i vicini); le relazioni con alta Disruption sono comuni e part-whole (`person → shirt`, `leaves → tree`, `sky → clouds`), che spostano poco l'embedding ma lo portano verso zone affollate cambiando il ranking.
+- **GCN**: le due metriche sono dissociate. Le relazioni con alto Delta L2 sono specifiche e rare (coppie insolite come `airplane → fan` a 0.666, `beach → horse` a 0.554) — producono grandi spostamenti in direzioni isolate dello spazio latente senza cambiare i vicini. Le relazioni con alta Disruption sono invece coppie part-whole comuni (`leaves → tree` a 0.700, `sky → cloud` a 0.560, `water → boat` a 0.360) che spostano poco l'embedding ma lo portano verso zone affollate cambiando il ranking. Grazie al bilanciamento stratificato, emergono relazioni di classi minoritarie (`water → boat`, `hand → wall`) che un campionamento casuale avrebbe sottorappresentato.
 
 Questo risultato è interpretabile alla luce delle architetture: GCN, non avendo accesso ai tipi di arco espliciti, usa le coppie di tipi di nodo come proxy per il significato della relazione. Le coppie rare identificano univocamente una scena ma la posizionano in regioni isolate; le coppie comuni organizzano i cluster condivisi. GINE invece, avendo i tipi di arco come feature esplicite, costruisce uno spazio latente più regolare dove Delta L2 e Disruption sono naturalmente allineati.
 

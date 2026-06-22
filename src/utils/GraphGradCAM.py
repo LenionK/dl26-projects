@@ -135,6 +135,11 @@ class GCNWrapper(torch.nn.Module):
         # Forziamo il prototipo a forma [1, Dimensioni_Embedding]
         self.prototype = prototype.detach().clone().view(1, -1)
 
+        # Fix PyG AssertionError: disabilita self-loops automatici sui layer conv
+        for conv in getattr(self.model, 'convs', []):
+            if hasattr(conv, 'add_self_loops'):
+                conv.add_self_loops = False
+
     def forward(self, x, edge_index):
         batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
         emb = self.model(x, edge_index, batch).view(1, -1)
@@ -150,6 +155,14 @@ class GINEWrapper(torch.nn.Module):
         self.model = model
         # Forziamo il prototipo a forma [1, Dimensioni_Embedding]
         self.prototype = prototype.detach().clone().view(1, -1)
+
+        # Fix PyG AssertionError: GNNExplainer applica una edge_mask che include
+        # i self-loops aggiunti internamente dai layer GINEConv. Disabilitiamo
+        # l'aggiunta automatica di self-loops su tutti i layer conv del modello
+        # per mantenere coerente la dimensione tra edge_mask e messaggi.
+        for conv in getattr(self.model, 'convs', []):
+            if hasattr(conv, 'add_self_loops'):
+                conv.add_self_loops = False
 
     def forward(self, x, edge_index, edge_attr):
         batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
@@ -249,6 +262,64 @@ def get_topk_neighbors(query_emb, gallery_embs, topk=10):
     """
     dists = torch.norm(gallery_embs - query_emb.unsqueeze(0), dim=1)
     return torch.argsort(dists)[:topk].tolist()
+
+
+# ---------------------------------------------------------------------------
+# Campionamento stratificato per classe
+# ---------------------------------------------------------------------------
+def stratified_sample(dataset, num_samples_per_class=None, num_samples=None, df=None):
+    """
+    Restituisce una lista di Data objects campionati in modo bilanciato per classe.
+
+    Modalità (sceglierne una):
+      - num_samples_per_class: N campioni esatti per ogni classe (bilanciato)
+      - num_samples           : totale campioni distribuiti equamente sulle classi
+
+    Args:
+        dataset              : dataset PyG indicizzabile
+        num_samples_per_class: campioni per classe (ha precedenza su num_samples)
+        num_samples          : campioni totali, divisi equamente tra le classi
+        df                   : DataFrame con colonna 'labels' (stesso ordine del dataset).
+                               Se None, usa data.y di ogni elemento.
+    Returns:
+        Lista di Data objects bilanciata per classe.
+    """
+    import math
+
+    # --- raggruppa gli indici per classe ---
+    class_to_indices = defaultdict(list)
+    for i, data in enumerate(dataset):
+        if df is not None:
+            label = int(df.iloc[i]['labels'])
+        else:
+            label = int(data.y.item()) if data.y.numel() == 1 else int(data.y[0].item())
+        class_to_indices[label].append(i)
+
+    classes = sorted(class_to_indices.keys())
+    n_classes = len(classes)
+
+    if num_samples_per_class is not None:
+        n_per_class = num_samples_per_class
+    elif num_samples is not None:
+        n_per_class = max(1, math.ceil(num_samples / n_classes))
+    else:
+        raise ValueError(
+            "Specificare almeno uno tra 'num_samples_per_class' e 'num_samples'."
+        )
+
+    sampled_indices = []
+    for cls in classes:
+        indices = class_to_indices[cls]
+        taken   = indices[:n_per_class]
+        if len(taken) < n_per_class:
+            warnings.warn(
+                f"Classe {cls}: richiesti {n_per_class} campioni, "
+                f"disponibili solo {len(taken)}.",
+                RuntimeWarning,
+            )
+        sampled_indices.extend(taken)
+
+    return [dataset[i] for i in sampled_indices]
 
 
 # ---------------------------------------------------------------------------
@@ -435,23 +506,67 @@ def plot_node_importance_by_class(
 # Analisi globale archi — GINE (GNNExplainer)
 # ---------------------------------------------------------------------------
 def analyze_global_edge_importance_with_explainer(
-    dataset_gine, model_gine, rel_vocab_gine, device, num_samples=50
+    dataset_gine, model_gine, rel_vocab_gine, device,
+    num_samples=50, num_samples_per_class=None, df=None, prototypes=None
 ):
     """
     Calcola l'importanza media degli archi per tipo di relazione usando
     GNNExplainer sul modello GINE.
+
+    Args:
+        num_samples_per_class: se specificato, usa campionamento stratificato
+                               (N campioni per ogni classe). Ha precedenza su num_samples.
+        df                   : DataFrame con colonna 'labels' per il campionamento
+                               stratificato (stesso ordine del dataset).
+                               Se None, usa data.y degli elementi del dataset.
+        prototypes           : dict {class_id -> tensore 1D} prodotto da
+                               compute_class_prototypes. Se None, viene usato
+                               il prototipo medio tra tutte le classi disponibili.
     """
     idx2rel    = {v: k for k, v in rel_vocab_gine.items()}
     rel_scores = defaultdict(list)
 
-    wrapped_model = GINEWrapper(model_gine)
+    # Ricava il prototipo da usare nel wrapper
+    if prototypes is not None:
+        proto_vecs = list(prototypes.values())
+        global_proto = torch.stack(proto_vecs).mean(dim=0).to(device)
+    else:
+        # fallback: embedding zero (GNNExplainer ottimizza la mask indipendentemente
+        # dallo score assoluto, quindi un prototipo neutro è accettabile)
+        warnings.warn(
+            "Nessun prototipo passato a analyze_global_edge_importance_with_explainer. "
+            "Usa 'prototypes=prototypes_gine' per risultati più accurati.",
+            RuntimeWarning,
+        )
+        # Inferisce la dimensione dell'embedding da un forward pass su un sample campione
+        _sample = dataset_gine[0]
+        with torch.no_grad():
+            _batch = torch.zeros(_sample.x.size(0), dtype=torch.long, device=device)
+            _emb   = model_gine(
+                _sample.x.to(device), _sample.edge_index.to(device),
+                _sample.edge_attr.to(device), _batch, num_graphs=1
+            )
+        global_proto = torch.zeros(_emb.shape[-1], device=device)
+
+    wrapped_model = GINEWrapper(model_gine, global_proto)
     explainer     = build_explainer(wrapped_model, epochs=100)
 
-    print(f"Analisi archi (GINE — GNNExplainer) su {num_samples} campioni...")
-    samples_to_test = min(num_samples, len(dataset_gine))
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples_list = stratified_sample(
+            dataset_gine, num_samples_per_class=num_samples_per_class, df=df
+        )
+        print(
+            f"Analisi archi (GINE — GNNExplainer) su {len(samples_list)} campioni "
+            f"stratificati ({num_samples_per_class} per classe)..."
+        )
+    else:
+        n = min(num_samples, len(dataset_gine))
+        samples_list = [dataset_gine[i] for i in range(n)]
+        print(f"Analisi archi (GINE — GNNExplainer) su {n} campioni...")
 
-    for idx in range(samples_to_test):
-        data        = dataset_gine[idx].to(device)
+    for data in samples_list:
+        data        = data.to(device)
         explanation = explainer(data.x, data.edge_index, edge_attr=data.edge_attr)
 
         if not (hasattr(explanation, 'edge_mask') and explanation.edge_mask is not None):
@@ -480,26 +595,64 @@ def analyze_global_edge_importance_with_explainer(
 # Analisi globale archi — GCN (GNNExplainer)
 # ---------------------------------------------------------------------------
 def analyze_global_edge_importance_gcn(
-    dataset_gcn, model_gcn, node_vocab_gcn, device, num_samples=50, min_count=3
+    dataset_gcn, model_gcn, node_vocab_gcn, device,
+    num_samples=50, min_count=3, num_samples_per_class=None, df=None, prototypes=None
 ):
     """
     Calcola l'importanza media degli archi per il modello GCN aggregandoli
     per coppia di tipi di nodo (Sorgente → Destinazione).
-    
+
     Aggiunto filtraggio per 'min_count' per evitare che relazioni viste una sola volta
     falsino la cima della classifica.
+
+    Args:
+        num_samples_per_class: se specificato, usa campionamento stratificato
+                               (N campioni per ogni classe). Ha precedenza su num_samples.
+        df                   : DataFrame con colonna 'labels' per il campionamento
+                               stratificato (stesso ordine del dataset).
+                               Se None, usa data.y degli elementi del dataset.
+        prototypes           : dict {class_id -> tensore 1D} prodotto da
+                               compute_class_prototypes. Se None, viene usato
+                               il prototipo medio tra tutte le classi.
     """
     idx2node   = {v: k for k, v in node_vocab_gcn.items()}
     rel_scores = defaultdict(list)
 
-    wrapped_model = GCNWrapper(model_gcn)
+    # Ricava il prototipo da usare nel wrapper
+    if prototypes is not None:
+        proto_vecs   = list(prototypes.values())
+        global_proto = torch.stack(proto_vecs).mean(dim=0).to(device)
+    else:
+        warnings.warn(
+            "Nessun prototipo passato a analyze_global_edge_importance_gcn. "
+            "Usa 'prototypes=prototypes_gcn' per risultati più accurati.",
+            RuntimeWarning,
+        )
+        _sample = dataset_gcn[0]
+        with torch.no_grad():
+            _batch = torch.zeros(_sample.x.size(0), dtype=torch.long, device=device)
+            _emb   = model_gcn(_sample.x.to(device), _sample.edge_index.to(device), _batch)
+        global_proto = torch.zeros(_emb.shape[-1], device=device)
+
+    wrapped_model = GCNWrapper(model_gcn, global_proto)
     explainer     = build_explainer(wrapped_model, epochs=100)
 
-    print(f"Analisi archi (GCN — GNNExplainer) su {num_samples} campioni...")
-    samples_to_test = min(num_samples, len(dataset_gcn))
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples_list = stratified_sample(
+            dataset_gcn, num_samples_per_class=num_samples_per_class, df=df
+        )
+        print(
+            f"Analisi archi (GCN — GNNExplainer) su {len(samples_list)} campioni "
+            f"stratificati ({num_samples_per_class} per classe)..."
+        )
+    else:
+        n = min(num_samples, len(dataset_gcn))
+        samples_list = [dataset_gcn[i] for i in range(n)]
+        print(f"Analisi archi (GCN — GNNExplainer) su {n} campioni...")
 
-    for idx in range(samples_to_test):
-        data        = dataset_gcn[idx].to(device)
+    for data in samples_list:
+        data        = data.to(device)
         explanation = explainer(data.x, data.edge_index)
 
         if not (hasattr(explanation, 'edge_mask') and explanation.edge_mask is not None):
@@ -599,7 +752,8 @@ def build_gallery_embeddings(model, dataset, device, model_type="gine"):
 # Robustezza per tipo di relazione — delta embedding
 # ---------------------------------------------------------------------------
 def robustness_by_relation_type(model, dataset, rel_vocab, device,
-                                 num_samples=None, model_type="gine"):
+                                 num_samples=None, model_type="gine",
+                                 num_samples_per_class=None, df=None):
     """
     Per ogni tipo di relazione nel vocabolario, rimuove tutti gli archi
     di quel tipo da ciascun grafo e misura il delta in norma L2 sull'embedding.
@@ -612,9 +766,15 @@ def robustness_by_relation_type(model, dataset, rel_vocab, device,
     Returns:
         pd.Series con indice = nome relazione, valori = delta medio.
     """
-    samples = list(dataset)
-    if num_samples is not None:
-        samples = samples[:num_samples]
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples = stratified_sample(
+            dataset, num_samples_per_class=num_samples_per_class, df=df
+        )
+    elif num_samples is not None:
+        samples = list(dataset)[:num_samples]
+    else:
+        samples = list(dataset)
 
     results = {}
 
@@ -661,7 +821,8 @@ def robustness_by_relation_type(model, dataset, rel_vocab, device,
 # Focal point analysis — ranking disruption
 # ---------------------------------------------------------------------------
 def focal_point_analysis(model, dataset, gallery_embs, rel_vocab, device,
-                          topk=10, num_samples=None, model_type="gine"):
+                          topk=10, num_samples=None, model_type="gine",
+                          num_samples_per_class=None, df=None):
     """
     Per ogni tipo di relazione misura quanto la sua rimozione altera il
     ranking dei vicini più prossimi nello spazio metrico.
@@ -677,9 +838,20 @@ def focal_point_analysis(model, dataset, gallery_embs, rel_vocab, device,
         pd.Series con indice = nome relazione, valori = disruption media.
     """
     gallery_embs = gallery_embs.to(device)
-    samples      = list(dataset)
-    if num_samples is not None:
-        samples = samples[:num_samples]
+
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples = stratified_sample(
+            dataset, num_samples_per_class=num_samples_per_class, df=df
+        )
+        print(
+            f"Focal Point Analysis ({model_type.upper()}) su {len(samples)} campioni "
+            f"stratificati ({num_samples_per_class} per classe)..."
+        )
+    elif num_samples is not None:
+        samples = list(dataset)[:num_samples]
+    else:
+        samples = list(dataset)
 
     results = {}
 
@@ -724,12 +896,30 @@ def focal_point_analysis(model, dataset, gallery_embs, rel_vocab, device,
     return pd.Series(results).sort_values(ascending=False)
 
 def focal_point_analysis_gcn(model, dataset, gallery_embs, node_vocab, device,
-                              topk=10, num_samples=None, min_edge_count=3):
-    
+                              topk=10, num_samples=None, min_edge_count=3,
+                              num_samples_per_class=None, df=None):
+    """
+    Args:
+        num_samples_per_class: se specificato, usa campionamento stratificato
+                               (N campioni per ogni classe). Ha precedenza su num_samples.
+        df                   : DataFrame con colonna 'labels' per il campionamento
+                               stratificato. Se None, usa data.y del dataset.
+    """
     gallery_embs = gallery_embs.to(device)
-    samples = list(dataset)
-    if num_samples is not None:
-        samples = samples[:num_samples]
+
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples = stratified_sample(
+            dataset, num_samples_per_class=num_samples_per_class, df=df
+        )
+        print(
+            f"Focal Point Analysis (GCN) su {len(samples)} campioni "
+            f"stratificati ({num_samples_per_class} per classe)..."
+        )
+    elif num_samples is not None:
+        samples = list(dataset)[:num_samples]
+    else:
+        samples = list(dataset)
 
     idx2node = {v: k for k, v in node_vocab.items()}
     unique_relations = set()
@@ -799,17 +989,28 @@ def focal_point_analysis_gcn(model, dataset, gallery_embs, node_vocab, device,
 # Robustezza per tipo di relazione — delta embedding per GCN
 # ---------------------------------------------------------------------------
 def robustness_by_relation_type_gcn(model, dataset, node_vocab, device,
-                                     num_samples=None):
+                                     num_samples=None,
+                                     num_samples_per_class=None, df=None):
     """
     Per ogni coppia di tipi di nodo (Src → Dst), rimuove tutti gli archi
     di quel tipo da ciascun grafo e misura il delta in norma L2 sull'embedding.
 
     Un delta alto indica che quella transizione strutturale è critica
     per la stabilità dell'embedding del modello (single point of failure).
+
+    Args:
+        num_samples_per_class: se specificato, usa campionamento stratificato.
+        df                   : DataFrame con colonna 'labels'. Se None usa data.y.
     """
-    samples = list(dataset)
-    if num_samples is not None:
-        samples = samples[:num_samples]
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples = stratified_sample(
+            dataset, num_samples_per_class=num_samples_per_class, df=df
+        )
+    elif num_samples is not None:
+        samples = list(dataset)[:num_samples]
+    else:
+        samples = list(dataset)
 
     idx2node = {v: k for k, v in node_vocab.items()}
     
@@ -870,16 +1071,23 @@ def robustness_by_relation_type_gcn(model, dataset, node_vocab, device,
 # ---------------------------------------------------------------------------
 def plot_disruption_distribution(model, dataset, gallery_embs, rel_vocab,
                                   rel_name, device, topk=10, num_samples=None,
-                                  model_name="GINE", model_type="gine"):
+                                  model_name="GINE", model_type="gine",
+                                  num_samples_per_class=None, df=None):
     """
     Istogramma + KDE della Ranking Disruption per una singola relazione.
     Utile per verificare se l'effetto è uniforme o concentrato su pochi outlier.
     """
     rel_id       = rel_vocab[rel_name]
     gallery_embs = gallery_embs.to(device)
-    samples      = list(dataset)
-    if num_samples is not None:
-        samples = samples[:num_samples]
+    # --- selezione campioni ---
+    if num_samples_per_class is not None:
+        samples = stratified_sample(
+            dataset, num_samples_per_class=num_samples_per_class, df=df
+        )
+    elif num_samples is not None:
+        samples = list(dataset)[:num_samples]
+    else:
+        samples = list(dataset)
 
     disruptions = []
     for data in samples:
